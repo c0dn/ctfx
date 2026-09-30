@@ -1,0 +1,66 @@
+name: release
+
+# Every push to main that changes the binary or the npm launcher cuts a
+# release: the version comes from conventional commits since the last tag
+# (.github/scripts/next-version.sh). Docs-only pushes do not release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "pkg/**"
+      - "go.mod"
+      - "go.sum"
+      - "npm/**"
+      - ".goreleaser.yaml"
+      - ".github/workflows/release.yml"
+      - ".github/scripts/next-version.sh"
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; no npm token is stored.
+      - run: npm install -g npm@latest
+      - name: Choose version
+        id: version
+        env:
+          NPM_PACKAGE: "@c0dn/ctfx"
+        run: echo "version=$(.github/scripts/next-version.sh)" >> "$GITHUB_OUTPUT"
+      - name: Tag
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # After GoReleaser, so the binaries the launcher downloads already exist.
+      - name: Build npm package
+        run: node npm/build.mjs "${{ steps.version.outputs.version }}"
+      - name: Publish npm package
+        run: npm publish dist/npm/ctfx --access public

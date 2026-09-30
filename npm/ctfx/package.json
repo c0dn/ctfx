@@ -1,0 +1,20 @@
+{
+  "name": "@c0dn/ctfx",
+  "version": "0.0.0",
+  "description": "CTF platform client with pluggable drivers (CTFd, rCTF, GZCTF, HTB, exec plugins)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/c0dn/ctfx.git"
+  },
+  "bin": {
+    "ctfx": "bin/ctfx.js"
+  },
+  "files": [
+    "bin/",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

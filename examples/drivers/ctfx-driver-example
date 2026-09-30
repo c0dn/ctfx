@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Minimal ctfx exec driver (protocol 1).
+
+ctfx runs `ctfx-driver-<name> <op>` with one JSON request on stdin:
+  {"protocol": 1, "op": "...", "config": {"platform", "profile", "root",
+   "source", "values": {...env keys...}}, "args": {...}}
+and expects one JSON object on stdout: {"result": ...} or
+{"error": {"kind": "auth|config|not_found|remote|unsupported|usage", "message": "..."}}.
+
+This example serves a static board; a real driver would call the platform's
+API with urllib using config["values"]["EXAMPLE_URL"] / EXAMPLE_TOKEN.
+"""
+import json
+import sys
+
+CHALLENGES = [
+    {"id": "1", "name": "warmup", "category": "misc", "points": 50, "solved": False,
+     "solves": 3, "description": "Say hi.", "files": []},
+    {"id": "2", "name": "baby-rsa", "category": "crypto", "points": 100, "solved": False,
+     "solves": 1, "description": "e=3", "files": [{"name": "out.txt", "url": "https://example.invalid/out.txt"}]},
+]
+
+
+def main():
+    req = json.load(sys.stdin)
+    op, args, values = req["op"], req.get("args", {}), req["config"]["values"]
+    if op == "capabilities":
+        return {"challenges": True, "submit": True, "scoreboard": True}
+    if op == "list_challenges":
+        return CHALLENGES
+    if op == "get_challenge":
+        for c in CHALLENGES:
+            if c["id"] == args["id"]:
+                return c
+        raise LookupError(f"challenge {args['id']} not found")
+    if op == "submit":
+        good = values.get("EXAMPLE_FLAG", "flag{example}")
+        status = "correct" if args["flag"] == good else "incorrect"
+        return {"challenge_id": args["id"], "status": status, "message": status}
+    if op == "scoreboard":
+        return {"total": 1, "entries": [{"position": 1, "account_id": "t1", "name": "team", "score": 150}]}
+    return None  # unreachable for ops not advertised in capabilities
+
+
+if __name__ == "__main__":
+    try:
+        out = {"result": main()}
+    except LookupError as e:
+        out = {"error": {"kind": "not_found", "message": str(e)}}
+    except Exception as e:  # noqa: BLE001 - report everything as a remote error
+        out = {"error": {"kind": "remote", "message": str(e)}}
+    json.dump(out, sys.stdout)
