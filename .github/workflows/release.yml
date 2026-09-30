@@ -42,7 +42,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # Trusted publishing (OIDC) needs npm >= 11.5.1; no npm token is stored.
+      # Trusted publishing (OIDC) with `npm stage publish` needs npm >= 11.15.0;
+      # no npm token is stored.
       - run: npm install -g npm@latest
       - name: Choose version
         id: version
@@ -62,5 +63,8 @@ jobs:
       # After GoReleaser, so the binaries the launcher downloads already exist.
       - name: Build npm package
         run: node npm/build.mjs "${{ steps.version.outputs.version }}"
-      - name: Publish npm package
-        run: npm publish dist/npm/ctfx --access public
+      # Staged, not live: approve with 2FA via `npm stage approve <id>` or
+      # npmjs.com > Staged Packages. The trusted publisher allows staging only.
+      - name: Stage npm package
+        working-directory: dist/npm/ctfx
+        run: npm stage publish --access public
