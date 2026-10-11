@@ -20,7 +20,7 @@ import (
 var Spec = driver.Spec{
 	Name:        "rctf",
 	DisplayName: "rCTF",
-	Description: "rCTF with auth token or team token; no hints or instances",
+	Description: "rCTF with auth token or team token; per-team instancer, no hints",
 	Kind:        "builtin",
 	Example: `# rCTF profile for ctfx
 CTFX_PLATFORM="rctf"
@@ -84,7 +84,7 @@ func New(env *driver.Env) (ctf.Driver, error) {
 }
 
 func (d *Driver) Capabilities() ctf.Capabilities {
-	return ctf.Capabilities{Challenges: true, Submit: true, Solves: true, Scoreboard: true, Team: true, Download: true}
+	return ctf.Capabilities{Challenges: true, Submit: true, Solves: true, Scoreboard: true, Team: true, Download: true, Instances: true}
 }
 
 type envelope struct {
@@ -216,12 +216,14 @@ func (d *Driver) profile(ctx context.Context) (map[string]any, error) {
 
 func (d *Driver) challenges(ctx context.Context) ([]map[string]any, map[string]bool, error) {
 	var chals []map[string]any
-	if _, err := d.api(ctx, http.MethodGet, "challs", nil, false, &chals); err != nil {
-		// Newer rCTF forks serve the challenge list from /api/v2/challs.
+	// Prefer /api/v2/challs: it is a superset of v1 and carries the per-team
+	// instancer metadata (instancerLifetime). Fall back to v1 for forks that
+	// only serve the older list endpoint.
+	if _, err := d.api(ctx, http.MethodGet, "../v2/challs", nil, false, &chals); err != nil {
 		if ctf.KindOf(err) != ctf.KindNotFound {
 			return nil, nil, err
 		}
-		if _, err := d.api(ctx, http.MethodGet, "../v2/challs", nil, false, &chals); err != nil {
+		if _, err := d.api(ctx, http.MethodGet, "challs", nil, false, &chals); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -275,6 +277,16 @@ func (d *Driver) mapChallenge(c map[string]any, solved map[string]bool) ctf.Chal
 			name = core.FilenameFromURL(u)
 		}
 		ch.Files = append(ch.Files, ctf.File{Name: core.SanitizeFilename(name), URL: u})
+	}
+	// v2 /challs marks per-team instancer challenges with a non-null lifetime.
+	if c["instancerLifetime"] != nil {
+		ch.Instance = &ctf.InstanceRef{Backend: "rctf", Slug: ch.ID}
+		if ms := core.Num(c["instancerLifetime"]); ms != nil {
+			if ch.Extra == nil {
+				ch.Extra = map[string]any{}
+			}
+			ch.Extra["instance_lifetime_ms"] = int64(*ms)
+		}
 	}
 	return ch
 }
@@ -430,6 +442,15 @@ func (d *Driver) Team(ctx context.Context) (*ctf.TeamStatus, error) {
 	return ts, nil
 }
 
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (d *Driver) PrepareDownload(ctx context.Context, fileURL string) (*ctf.DownloadRequest, error) {
 	u, err := core.JoinURL(d.base, fileURL)
 	if err != nil {
@@ -448,11 +469,171 @@ func (d *Driver) PrepareDownload(ctx context.Context, fileURL string) (*ctf.Down
 	return dr, nil
 }
 
-func firstNonEmpty(vs ...string) string {
-	for _, v := range vs {
-		if v != "" {
-			return v
+// instanceEndpoint is one exposed connection from the rCTF instancer.
+type instanceEndpoint struct {
+	Kind  string `json:"kind"` // tcp, tcp-ssl, http, https, raw
+	Host  string `json:"host"`
+	Port  int    `json:"port"`
+	Title string `json:"title"`
+	Text  string `json:"text"`
+}
+
+// instanceStatus is the data payload of goodInstanceStatus.
+type instanceStatus struct {
+	Status               string             `json:"status"` // stopped, starting, running, stopping, errored
+	TimeLeftMilliseconds *int64             `json:"timeLeftMilliseconds"`
+	Endpoints            []instanceEndpoint `json:"endpoints"`
+}
+
+// instance drives FortID's per-team instancer, a service bolted onto standard
+// rCTF at /api/v2/integrations/challs/:id/instance. The HTTP verb selects the
+// action (GET status, PUT start, PATCH extend, DELETE stop); every verb returns
+// the same goodInstanceStatus envelope.
+func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.Instance, error) {
+	id := strings.TrimSpace(challenge)
+	method := ""
+	switch action {
+	case ctf.InstanceStatus:
+		method = http.MethodGet
+	case ctf.InstanceStart:
+		method = http.MethodPut
+	case ctf.InstanceExtend:
+		method = http.MethodPatch
+	case ctf.InstanceStop:
+		method = http.MethodDelete
+	default:
+		return nil, ctf.Errorf(ctf.KindUsage, "unknown instance action %q", action)
+	}
+	if id == "" {
+		return nil, ctf.Errorf(ctf.KindUsage, "instance needs a challenge ID")
+	}
+
+	tok, err := d.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if tok == "" {
+		return nil, d.authMissing()
+	}
+
+	var body any
+	if method != http.MethodGet {
+		body = map[string]any{}
+	}
+	resp, env, err := d.raw(ctx, method, "../v2/integrations/challs/"+url.PathEscape(id)+"/instance", body, tok)
+	if err != nil {
+		return nil, err
+	}
+
+	inst := &ctf.Instance{Challenge: id, Backend: "rctf", Action: action, HTTPStatus: resp.Status}
+	if resp.Status == 401 {
+		hint := "check RCTF_AUTH_TOKEN"
+		if d.teamToken != "" {
+			hint = "check RCTF_TEAM_TOKEN"
+		}
+		msg := ""
+		if env != nil {
+			msg = firstNonEmpty(env.Message, env.Kind)
+		}
+		return nil, ctf.Errorf(ctf.KindAuth, "rCTF authentication failed (%s): %s", msg, hint)
+	}
+	if env == nil {
+		return nil, core.StatusError(resp.Status, "rCTF instance "+action, core.Truncate(string(resp.Body), 200))
+	}
+
+	// The instancer reports "not configured" as a badInstancerError. Treat a
+	// status query on such a challenge as "no instance" rather than an error.
+	if isErrorKind(env.Kind) {
+		var e struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(env.Data, &e)
+		msg := firstNonEmpty(e.Message, env.Message, env.Kind)
+		if action == ctf.InstanceStatus && strings.Contains(strings.ToLower(msg), "not configured") {
+			inst.Status, inst.Message = "not_started", msg
+			return inst, nil
+		}
+		inst.Status, inst.Message = "error", msg
+		return inst, nil
+	}
+
+	var st instanceStatus
+	if len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, &st); err != nil {
+			return nil, ctf.Errorf(ctf.KindRemote, "rCTF instance %s: unexpected data: %v", action, err)
 		}
 	}
-	return ""
+	if st.TimeLeftMilliseconds != nil {
+		inst.Expires = time.Now().UTC().Add(time.Duration(*st.TimeLeftMilliseconds) * time.Millisecond).Format(time.RFC3339)
+	}
+	if ep := pickEndpoint(st.Endpoints); ep != nil {
+		inst.Host = ep.Host
+		if ep.Port != 0 {
+			inst.Host = ep.Host + ":" + strconv.Itoa(ep.Port)
+		}
+		inst.Connect = connectFor(ep)
+	}
+
+	switch st.Status {
+	case "stopped", "":
+		switch action {
+		case ctf.InstanceStop:
+			inst.Status = "terminated"
+		case ctf.InstanceStatus:
+			inst.Status, inst.Message = "not_started", firstNonEmpty(inst.Message, "instance not started")
+		default:
+			// A start/extend that still reports stopped did not take effect.
+			inst.Status = "stopped"
+		}
+	case "errored":
+		inst.Status = "error"
+		inst.Message = firstNonEmpty(inst.Message, "instancer reported an errored instance")
+	default:
+		// running, starting, stopping: report the real lifecycle state.
+		inst.Status = st.Status
+	}
+	return inst, nil
+}
+
+// pickEndpoint chooses the most useful endpoint: the first with a host, but
+// preferring one that carries a port (a concrete connect target).
+func pickEndpoint(eps []instanceEndpoint) *instanceEndpoint {
+	var fallback *instanceEndpoint
+	for i := range eps {
+		ep := &eps[i]
+		if ep.Host == "" {
+			continue
+		}
+		if ep.Port != 0 {
+			return ep
+		}
+		if fallback == nil {
+			fallback = ep
+		}
+	}
+	return fallback
+}
+
+// connectFor builds a connection hint from an instancer endpoint.
+func connectFor(ep *instanceEndpoint) *ctf.Connect {
+	host := ep.Host
+	if ep.Port != 0 {
+		host = ep.Host + ":" + strconv.Itoa(ep.Port)
+	}
+	c := &ctf.Connect{Host: host, Command: ep.Text}
+	switch ep.Kind {
+	case "http":
+		c.URL = "http://" + host
+	case "https":
+		c.URL = "https://" + host
+	case "tcp-ssl":
+		if c.Command == "" {
+			c.Command = "openssl s_client -quiet -connect " + ep.Host + ":" + strconv.Itoa(ep.Port)
+		}
+	case "tcp", "raw", "":
+		if c.Command == "" && ep.Port != 0 {
+			c.Command = "nc " + ep.Host + " " + strconv.Itoa(ep.Port)
+		}
+	}
+	return c
 }

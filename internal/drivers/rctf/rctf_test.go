@@ -159,3 +159,117 @@ func TestAmbiguousConfig(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// TestInstanceLifecycle drives FortID's per-team instancer at
+// /api/v2/integrations/challs/:id/instance, where the HTTP verb selects the
+// action and every verb returns the same goodInstanceStatus envelope.
+func TestInstanceLifecycle(t *testing.T) {
+	// started tracks whether the fake instance is running, so status reflects
+	// the previous start/stop like the real instancer.
+	var started bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer auth" {
+			w.WriteHeader(401)
+			w.Write([]byte(`{"kind":"badToken","message":"bad token"}`))
+			return
+		}
+		const base = "/api/v2/integrations/challs/"
+		running := `{"kind":"goodInstanceStatus","message":"ok","data":{"status":"running","timeLeftMilliseconds":600000,"endpoints":[{"kind":"tcp-ssl","host":"fortune.inst15.ctf.example","port":1337,"title":"Fortune"}]}}`
+		switch {
+		case r.URL.Path == base+"inst-chall/instance":
+			switch r.Method {
+			case http.MethodPut: // start
+				started = true
+				w.Write([]byte(`{"kind":"goodInstanceStatus","message":"ok","data":{"status":"starting","timeLeftMilliseconds":1800000,"endpoints":[{"kind":"tcp-ssl","host":"fortune.inst15.ctf.example","port":1337,"title":"Fortune"}]}}`))
+			case http.MethodPatch: // extend
+				w.Write([]byte(running))
+			case http.MethodDelete: // stop
+				started = false
+				w.Write([]byte(`{"kind":"goodInstanceStatus","message":"ok","data":{"status":"stopped","timeLeftMilliseconds":null,"endpoints":null}}`))
+			default: // GET status
+				if started {
+					w.Write([]byte(running))
+				} else {
+					w.Write([]byte(`{"kind":"goodInstanceStatus","message":"ok","data":{"status":"stopped","timeLeftMilliseconds":null,"endpoints":null}}`))
+				}
+			}
+		case r.URL.Path == base+"plain-chall/instance":
+			w.WriteHeader(400)
+			w.Write([]byte(`{"kind":"badInstancerError","message":"Instancer has returned an error.","data":{"message":"Challenge is not configured for instancer"}}`))
+		default:
+			w.WriteHeader(404)
+			w.Write([]byte(`{"kind":"badEndpoint","message":"no"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	d, err := New(&driver.Env{Config: &config.Config{Platform: "rctf", Values: map[string]string{
+		"RCTF_URL": srv.URL, "RCTF_AUTH_TOKEN": "auth"}}, Client: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	step := func(action, wantStatus string) *ctf.Instance {
+		t.Helper()
+		inst, err := d.Instance(ctx, action, "inst-chall")
+		if err != nil || inst.Status != wantStatus {
+			t.Fatalf("%s: got %+v %v", action, inst, err)
+		}
+		return inst
+	}
+	step(ctf.InstanceStatus, "not_started")
+	inst := step(ctf.InstanceStart, "starting")
+	if inst.Host != "fortune.inst15.ctf.example:1337" || inst.Connect == nil ||
+		inst.Connect.Command != "openssl s_client -quiet -connect fortune.inst15.ctf.example:1337" || inst.Expires == "" {
+		t.Fatalf("start: %+v (connect %+v)", inst, inst.Connect)
+	}
+	step(ctf.InstanceStatus, "running")
+	if inst := step(ctf.InstanceExtend, "running"); inst.Host != "fortune.inst15.ctf.example:1337" {
+		t.Fatalf("extend: %+v", inst)
+	}
+	step(ctf.InstanceStop, "terminated")
+	step(ctf.InstanceStatus, "not_started")
+
+	// A challenge the instancer does not manage reports not_started on status.
+	if inst, err := d.Instance(ctx, ctf.InstanceStatus, "plain-chall"); err != nil || inst.Status != "not_started" {
+		t.Fatalf("plain status: %+v %v", inst, err)
+	}
+	// but surfaces the error for an action.
+	if inst, err := d.Instance(ctx, ctf.InstanceStart, "plain-chall"); err != nil || inst.Status != "error" {
+		t.Fatalf("plain start: %+v %v", inst, err)
+	}
+	if _, err := d.Instance(ctx, "bogus", "inst-chall"); ctf.KindOf(err) != ctf.KindUsage {
+		t.Fatalf("bogus action: %v", err)
+	}
+}
+
+// TestChallengeInstanceFlag checks that v2's instancerLifetime marks a
+// challenge as instanced.
+func TestChallengeInstanceFlag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/challs":
+			w.Write([]byte(`{"kind":"goodChallenges","data":[
+				{"id":"pwn1","name":"P","category":"pwn","points":100,"instancerLifetime":1800000},
+				{"id":"cry1","name":"C","category":"crypto","points":100,"instancerLifetime":null}]}`))
+		case "/api/v1/users/me", "/api/v2/users/me":
+			w.Write([]byte(`{"kind":"goodUserData","data":{"solves":[]}}`))
+		default:
+			w.WriteHeader(404)
+			w.Write([]byte(`{"kind":"badEndpoint","message":"no"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	d, _ := New(&driver.Env{Config: &config.Config{Platform: "rctf", Values: map[string]string{"RCTF_URL": srv.URL, "RCTF_AUTH_TOKEN": "x"}}, Client: srv.Client()})
+	pwn, err := d.GetChallenge(context.Background(), "pwn1")
+	if err != nil || pwn.Instance == nil || pwn.Instance.Backend != "rctf" || pwn.Instance.Slug != "pwn1" {
+		t.Fatalf("pwn1: %+v %v", pwn, err)
+	}
+	if pwn.Extra["instance_lifetime_ms"] != int64(1800000) {
+		t.Fatalf("lifetime: %+v", pwn.Extra)
+	}
+	cry, err := d.GetChallenge(context.Background(), "cry1")
+	if err != nil || cry.Instance != nil {
+		t.Fatalf("cry1 should not be instanced: %+v %v", cry, err)
+	}
+}
