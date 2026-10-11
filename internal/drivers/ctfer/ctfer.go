@@ -546,14 +546,16 @@ func classifyFlash(category, message string, status int) string {
 		return ctf.StatusNotStarted
 	case strings.Contains(m, "ended"), strings.Contains(m, "closed"), strings.Contains(m, "over"):
 		return ctf.StatusEnded
+	// Rate limits before "already": the cooldown flash also says "no attempt
+	// was consumed", which must not be read as already-solved.
+	case strings.Contains(m, "too quickly"), strings.Contains(m, "too many"),
+		strings.Contains(m, "cooldown"), strings.Contains(m, "rate"),
+		strings.Contains(m, "wait"), strings.Contains(m, "no attempts"),
+		strings.Contains(m, "maximum"), strings.Contains(m, "exhausted"), status == 429:
+		return ctf.StatusRateLimited
 	case strings.Contains(m, "already"), strings.Contains(m, "confirmed"),
 		strings.Contains(m, "no attempt was consumed"):
 		return ctf.StatusAlreadySolved
-	case strings.Contains(m, "too many"), strings.Contains(m, "cooldown"),
-		strings.Contains(m, "rate"), strings.Contains(m, "wait"),
-		strings.Contains(m, "no attempts"), strings.Contains(m, "maximum"),
-		strings.Contains(m, "exhausted"), status == 429:
-		return ctf.StatusRateLimited
 	// "incorrect"/"invalid" must be tested before "correct" (substring trap).
 	case strings.Contains(m, "incorrect"), strings.Contains(m, "invalid"),
 		strings.Contains(m, "wrong"), strings.Contains(m, "not accepted"),

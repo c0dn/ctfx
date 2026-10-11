@@ -295,6 +295,7 @@ func TestClassifyFlash(t *testing.T) {
 		{"error", "You have already solved this.", 302, ctf.StatusAlreadySolved},
 		{"success", "This finding is already confirmed; no attempt was consumed.", 302, ctf.StatusAlreadySolved},
 		{"error", "Too many attempts, wait.", 302, ctf.StatusRateLimited},
+		{"error", "Finding #149 — Two Fronts: Submission received too quickly — no attempt was consumed. Wait 1 second before retrying; this cooldown applies across findings.", 302, ctf.StatusRateLimited},
 		{"", "", 302, ctf.StatusError},
 	}
 	for _, c := range cases {
