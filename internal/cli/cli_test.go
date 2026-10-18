@@ -120,11 +120,18 @@ func TestSubmitLedgerAndOracle(t *testing.T) {
 	if r := run(t, root, good, "submit", "7"); r.code != 0 || submitOut(r)["status"] != "correct" {
 		t.Fatalf("correct submit: %d %s %s", r.code, r.stdout, r.stderr)
 	}
-	// Same flag on another challenge is short-circuited from the ledger.
-	r := run(t, root, good, "submit", "8")
-	res := submitOut(r)
-	if r.code != 0 || res["status"] != "correct" || !strings.Contains(res["message"].(string), "ledger") {
-		t.Fatalf("ledger short-circuit: %d %s", r.code, r.stdout)
+	// The same flag on the SAME challenge is short-circuited from the ledger.
+	if r := run(t, root, good, "submit", "7"); r.code != 0 ||
+		submitOut(r)["status"] != "correct" ||
+		!strings.Contains(submitOut(r)["message"].(string), "ledger") {
+		t.Fatalf("same-challenge ledger short-circuit: %d %s", r.code, r.stdout)
+	}
+	// The same flag on ANOTHER challenge must NOT short-circuit: a flag accepted
+	// for one challenge is not a verdict for another, so it is sent to the
+	// platform, which grades it per challenge (here: incorrect for challenge 8).
+	if r := run(t, root, good, "submit", "8"); r.code != 0 ||
+		submitOut(r)["status"] != "incorrect" {
+		t.Fatalf("cross-challenge must reach platform, not ledger: %d %s", r.code, r.stdout)
 	}
 	// A wrong flag is recorded, then refused on an identical resend.
 	if r := run(t, root, "", "submit", "7", "flag{no}"); r.code != 0 || submitOut(r)["status"] != "incorrect" {
@@ -137,7 +144,7 @@ func TestSubmitLedgerAndOracle(t *testing.T) {
 		t.Fatalf("--force should resend: %d %s", r.code, r.stdout)
 	}
 	// A failing oracle blocks the submission without contacting the platform.
-	r = run(t, root, "", "submit", "7", "flag{oracle}", "--verify", "false")
+	r := run(t, root, "", "submit", "7", "flag{oracle}", "--verify", "false")
 	if r.code != 0 || submitOut(r)["status"] != "error" {
 		t.Fatalf("oracle reject: %d %s %s", r.code, r.stdout, r.stderr)
 	}

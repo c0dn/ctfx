@@ -75,13 +75,18 @@ func appendLedger(root string, r ledgerRecord) error {
 	return err
 }
 
-// priorCorrect finds an earlier accepted submission of the same flag on the
-// same platform/profile, regardless of which challenge it was for.
-func priorCorrect(root, platform, profile, hash string) (ledgerRecord, bool) {
+// priorCorrect finds an earlier accepted submission of the same flag for the
+// same challenge on the same platform/profile. It is deliberately scoped to the
+// challenge: a flag that is correct for one challenge says nothing about another
+// (CTF platforms grade per challenge), so short-circuiting across challenges
+// would report a bogus "correct" for a challenge the platform never accepted it
+// for. The caller passes the resolved challenge id the flag is being sent to.
+func priorCorrect(root, platform, profile, hash, challenge string) (ledgerRecord, bool) {
 	var found ledgerRecord
 	var ok bool
 	for _, r := range readLedger(root) {
 		if r.Platform == platform && r.Profile == profile && r.FlagSHA == hash &&
+			r.Challenge == challenge &&
 			(r.Status == ctf.StatusCorrect || r.Status == ctf.StatusAlreadySolved) {
 			found, ok = r, true
 		}

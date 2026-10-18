@@ -388,9 +388,12 @@ func (a *App) cmdSubmit(ctx context.Context, args []string) error {
 	id := pos[0]
 	hash := flagHash(flagValue)
 
-	// Ledger: never resubmit a flag already known correct, and refuse an
-	// identical wrong flag unless forced (both save rate limit / penalties).
-	if rec, ok := priorCorrect(s.cfg.Root, s.cfg.Platform, s.cfg.Profile, hash); ok {
+	// Ledger: never resubmit a flag already known correct for THIS challenge,
+	// and refuse an identical wrong flag for this challenge unless forced (both
+	// save rate limit / penalties). The correct short-circuit is scoped to the
+	// challenge: a flag accepted for one challenge is not a verdict for another,
+	// so it must still be sent to the platform, which grades per challenge.
+	if rec, ok := priorCorrect(s.cfg.Root, s.cfg.Platform, s.cfg.Profile, hash, id); ok {
 		res := &ctf.SubmitResult{ChallengeID: id, Status: rec.Status, Correct: rec.Status == ctf.StatusCorrect,
 			Message: "known from an earlier submission on " + rec.At + " (ledger); not re-sent"}
 		return a.emitSubmit(s, res)
