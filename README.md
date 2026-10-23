@@ -1,7 +1,7 @@
 # ctfx
 
 A small CLI for CTF platforms. You get one command set across CTFd, rCTF,
-GZCTF, Hack The Box CTF and CTFer (a bespoke forensics-exercise platform), and
+GZCTF, Hack The Box CTF, HITCON CTF and CTFer (a bespoke forensics-exercise platform), and
 any other platform can be added with an exec
 plugin written in whatever language you like. The CLI is built for AI coding
 agents as well as people: output is JSON whenever stdout is not a terminal,
@@ -76,6 +76,7 @@ across.
 | `gzctf` | `GZCTF_URL` (or a `/games/<id>` URL), `GZCTF_GAME`, `GZCTF_TOKEN` or `GZCTF_USERNAME`+`GZCTF_PASSWORD` |
 | `htb` | `HTB_URL` (default `https://ctf.hackthebox.com`), `HTB_EVENT`, `HTB_TOKEN` (JWT) |
 | `ctfer` | `CTFER_URL`, `CTFER_USERNAME`+`CTFER_PASSWORD` or `CTFER_SESSION_COOKIE` (+ `CTFER_SESSION_COOKIE_NAME`), `CTFER_VERIFY_SSL` |
+| `hitcon` | `HITCON_URL`, `HITCON_SESSIONID` (browser `sessionid` cookie; login needs Turnstile), `HITCON_TEAM_TOKEN` (instancers), optional `HITCON_CSRFTOKEN`, `HITCON_INSTANCERS` (`<id>=<hostname\|calc\|vulcreator>@<url>;...`), `HITCON_IMPERSONATE` (default `chrome`) |
 
 ### Getting past bot screening
 

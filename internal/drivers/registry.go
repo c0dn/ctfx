@@ -11,11 +11,12 @@ import (
 	"github.com/c0dn/ctfx/internal/drivers/ctfer"
 	"github.com/c0dn/ctfx/internal/drivers/exec"
 	"github.com/c0dn/ctfx/internal/drivers/gzctf"
+	"github.com/c0dn/ctfx/internal/drivers/hitcon"
 	"github.com/c0dn/ctfx/internal/drivers/htb"
 	"github.com/c0dn/ctfx/internal/drivers/rctf"
 )
 
-var builtin = []driver.Spec{ctfd.Spec, rctf.Spec, gzctf.Spec, htb.Spec, ctfer.Spec}
+var builtin = []driver.Spec{ctfd.Spec, rctf.Spec, gzctf.Spec, htb.Spec, ctfer.Spec, hitcon.Spec}
 
 // Builtin returns the built-in driver names.
 func Builtin() []string {
