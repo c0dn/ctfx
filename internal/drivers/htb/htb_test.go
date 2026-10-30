@@ -44,7 +44,7 @@ func newServer(t *testing.T) (*httptest.Server, *submitCapture) {
 			return
 		}
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/ctf/5":
+		case "GET /api/ctfs/5":
 			w.Write([]byte(eventJSON))
 		case "GET /api/public/challenge-categories":
 			w.Write([]byte(categoriesJSON))

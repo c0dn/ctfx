@@ -26,12 +26,10 @@ const defaultBase = "https://ctf.hackthebox.com"
 
 // HTB API routes. All are under /api.
 const (
-	// challengeListPath is the event detail + challenge list route. The live
-	// HTB UI uses the SINGULAR /api/ctf/<id>; ctfbridge instead uses the plural
-	// /api/ctfs/<id> and admits its per-challenge detail route is copied from
-	// GZCTF (and therefore wrong). We default to the singular form; the
-	// /api/ctf vs /api/ctfs choice must be confirmed against a live event.
-	challengeListPath = "/api/ctf/"
+	// challengeListPath is the event detail + challenge list route: the plural
+	// /api/ctfs/<id>, confirmed against the live CTF Try Out event (the
+	// singular /api/ctf/<id> now serves the SPA's HTML).
+	challengeListPath = "/api/ctfs/"
 	categoriesPath    = "/api/public/challenge-categories" // -> [{id,name}]
 	submitPath        = "/api/flags/own"                   // POST {challenge_id,flag}
 	scoresPath        = "/api/ctfs/scores/"                // plural, confirmed in ctfbridge
