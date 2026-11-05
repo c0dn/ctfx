@@ -8,15 +8,16 @@ import (
 
 	"github.com/c0dn/ctfx/internal/driver"
 	"github.com/c0dn/ctfx/internal/drivers/ctfd"
-	"github.com/c0dn/ctfx/internal/drivers/ctfer"
 	"github.com/c0dn/ctfx/internal/drivers/exec"
 	"github.com/c0dn/ctfx/internal/drivers/gzctf"
-	"github.com/c0dn/ctfx/internal/drivers/hitcon"
 	"github.com/c0dn/ctfx/internal/drivers/htb"
 	"github.com/c0dn/ctfx/internal/drivers/rctf"
 )
 
-var builtin = []driver.Spec{ctfd.Spec, rctf.Spec, gzctf.Spec, htb.Spec, ctfer.Spec, hitcon.Spec}
+// Built-in drivers are for widely used, stable platforms only. A one-off or
+// custom platform gets an exec driver (docs/plugins.md), so supporting it
+// never needs a ctfx release.
+var builtin = []driver.Spec{ctfd.Spec, rctf.Spec, gzctf.Spec, htb.Spec}
 
 // Builtin returns the built-in driver names.
 func Builtin() []string {
