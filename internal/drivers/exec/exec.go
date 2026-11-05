@@ -11,8 +11,10 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/c0dn/ctfx/internal/config"
 	"github.com/c0dn/ctfx/internal/core"
@@ -20,8 +22,14 @@ import (
 	"github.com/c0dn/ctfx/pkg/ctf"
 )
 
-// Protocol is the plugin protocol version sent on every call.
-const Protocol = 1
+// Protocol is the plugin protocol version sent on every call. A driver must
+// declare the same version in its capabilities reply; any other is refused.
+const Protocol = ctf.Protocol
+
+// Timeout bounds one plugin call. Override per profile with CTFX_TIMEOUT
+// (seconds). A plugin that runs past it is killed and the call fails with
+// KindTimeout.
+const Timeout = 60 * time.Second
 
 // Prefix is the executable-name prefix for plugins.
 const Prefix = "ctfx-driver-"
@@ -87,15 +95,27 @@ func Spec(name, path string) driver.Spec {
 		Description: "exec plugin " + path,
 		Example:     fmt.Sprintf("# %s profile for ctfx (exec plugin)\nCTFX_PLATFORM=%q\n%s_URL=\"https://ctf.example\"\n# %s_TOKEN=\"\"\n", name, name, up, up),
 		New: func(env *driver.Env) (ctf.Driver, error) {
-			return &Driver{path: path, cfg: env.Config}, nil
+			d := &Driver{path: path, cfg: env.Config, timeout: Timeout}
+			if v := env.Config.Get("TIMEOUT"); v != "" {
+				n, err := time.ParseDuration(v + "s")
+				if err != nil || n <= 0 {
+					return nil, ctf.Errorf(ctf.KindConfig, "CTFX_TIMEOUT %q: want a positive number of seconds", v)
+				}
+				d.timeout = n
+			}
+			return d, nil
 		},
 	}
 }
 
 // Driver proxies every operation to the plugin process.
+//
+// The caller's context and the per-call timeout both apply; each call runs in
+// its own process, so concurrent calls are safe.
 type Driver struct {
-	path string
-	cfg  *config.Config
+	path    string
+	cfg     *config.Config
+	timeout time.Duration
 
 	once sync.Once
 	caps ctf.Capabilities
@@ -134,12 +154,18 @@ func (d *Driver) call(ctx context.Context, op string, args map[string]any, out a
 	if err != nil {
 		return err
 	}
-	cmd := osexec.CommandContext(ctx, d.path, op)
+	cctx, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
+	cmd := osexec.CommandContext(cctx, d.path, op)
 	cmd.Stdin = bytes.NewReader(in)
 	cmd.Dir = d.cfg.Root
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
+	if cctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		return ctf.Errorf(ctf.KindTimeout, "driver %s %s did not answer within %s", filepath.Base(d.path), op, d.timeout)
+	}
 	var resp response
 	if json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp) != nil {
 		detail := core.Truncate(stderr.String(), 400)
@@ -150,9 +176,7 @@ func (d *Driver) call(ctx context.Context, op string, args map[string]any, out a
 	}
 	if resp.Error != nil {
 		kind := ctf.Kind(resp.Error.Kind)
-		switch kind {
-		case ctf.KindUsage, ctf.KindConfig, ctf.KindAuth, ctf.KindUnsupported, ctf.KindNotFound, ctf.KindRemote:
-		default:
+		if !slices.Contains(ctf.Kinds, kind) {
 			kind = ctf.KindRemote
 		}
 		return &ctf.Error{Kind: kind, Message: resp.Error.Message}
@@ -168,9 +192,39 @@ func (d *Driver) call(ctx context.Context, op string, args map[string]any, out a
 	return nil
 }
 
+// capsReply is the capabilities result: the capabilities plus the protocol the
+// driver speaks.
+type capsReply struct {
+	Protocol int `json:"protocol"`
+	ctf.Capabilities
+}
+
 func (d *Driver) Capabilities() ctf.Capabilities {
-	d.once.Do(func() { d.err = d.call(context.Background(), "capabilities", nil, &d.caps) })
+	d.once.Do(func() {
+		var r capsReply
+		if d.err = d.call(context.Background(), "capabilities", nil, &r); d.err != nil {
+			return
+		}
+		if r.Protocol != Protocol {
+			d.err = ctf.Errorf(ctf.KindConfig, "driver %s speaks protocol %d; ctfx needs protocol %d (see docs/plugins.md)",
+				filepath.Base(d.path), r.Protocol, Protocol)
+			return
+		}
+		for _, a := range r.InstanceActions {
+			if !slices.Contains(ctf.InstanceActions, a) {
+				d.err = ctf.Errorf(ctf.KindConfig, "driver %s advertises unknown instance action %q", filepath.Base(d.path), a)
+				return
+			}
+		}
+		d.caps = r.Capabilities
+	})
 	return d.caps
+}
+
+// Err is the capabilities error, if the driver failed its handshake.
+func (d *Driver) Err() error {
+	d.Capabilities()
+	return d.err
 }
 
 // require fails fast with KindUnsupported when the plugin didn't advertise op.
@@ -270,9 +324,23 @@ func (d *Driver) UnlockHint(ctx context.Context, hintID string) (*ctf.Hint, erro
 }
 
 func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.Instance, error) {
-	if err := d.require(d.Capabilities().Instances, "challenge instances"); err != nil {
+	caps := d.Capabilities()
+	if err := d.require(caps.Instances, "challenge instances"); err != nil {
 		return nil, err
 	}
+	if !caps.Supports(action) {
+		// A driver without its own reset gets stop then start.
+		if action == ctf.InstanceReset && caps.Supports(ctf.InstanceStop) && caps.Supports(ctf.InstanceStart) {
+			return ctf.ResetByRestart(ctx, d, challenge)
+		}
+		return nil, ctf.Errorf(ctf.KindUnsupported, "instance %s is not supported by driver %s", action, filepath.Base(d.path))
+	}
 	var out ctf.Instance
-	return &out, d.call(ctx, "instance", map[string]any{"action": action, "challenge": challenge}, &out)
+	if err := d.call(ctx, "instance", map[string]any{"action": action, "challenge": challenge}, &out); err != nil {
+		return nil, err
+	}
+	if out.Action == "" {
+		out.Action = action
+	}
+	return &out, nil
 }

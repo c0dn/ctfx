@@ -1,52 +1,122 @@
 #!/usr/bin/env python3
-"""Minimal ctfx exec driver (protocol 1).
+"""Reference ctfx exec driver (protocol 2). See docs/plugins.md.
 
 ctfx runs `ctfx-driver-<name> <op>` with one JSON request on stdin:
-  {"protocol": 1, "op": "...", "config": {"platform", "profile", "root",
-   "source", "values": {...env keys...}}, "args": {...}}
+  {"protocol": 2, "op": "...", "config": {"platform", "profile", "root",
+   "source", "values": {...profile keys...}}, "args": {...}}
 and expects one JSON object on stdout: {"result": ...} or
-{"error": {"kind": "auth|config|not_found|remote|unsupported|usage", "message": "..."}}.
+{"error": {"kind": "<kind>", "message": "..."}}.
 
-This example serves a static board; a real driver would call the platform's
-API with urllib using config["values"]["EXAMPLE_URL"] / EXAMPLE_TOKEN.
+This driver serves a static board with one per-team instance, so it covers
+every shape the protocol defines. A real driver calls the platform's API with
+urllib using config["values"] (EXAMPLE_URL, EXAMPLE_TOKEN, ...).
 """
 import json
+import os
 import sys
+import time
+
+PROTOCOL = 2
 
 CHALLENGES = [
     {"id": "1", "name": "warmup", "category": "misc", "points": 50, "solved": False,
-     "solves": 3, "description": "Say hi.", "files": []},
+     "solves": 3, "description": "Say hi.",
+     "connection": {"host": "warmup.example.invalid:1337", "port": 1337,
+                    "command": "nc warmup.example.invalid 1337"},
+     "hints": [{"id": "h1", "title": "free", "cost": 0, "locked": False, "content": "read the description"},
+               {"id": "h2", "title": "paid", "cost": 25, "locked": True, "content": None}]},
     {"id": "2", "name": "baby-rsa", "category": "crypto", "points": 100, "solved": False,
-     "solves": 1, "description": "e=3", "files": [{"name": "out.txt", "url": "https://example.invalid/out.txt"}]},
+     "solves": 1, "description": "e=3",
+     "files": [{"name": "out.txt", "url": "https://example.invalid/out.txt"}],
+     "limits": {"max_attempts": 5, "remaining_attempts": 5}},
+    {"id": "3", "name": "heap", "category": "pwn", "points": 300, "solved": False,
+     "solves": 0, "description": "Start an instance.",
+     "instance": {"backend": "example", "slug": "heap", "lifetime_seconds": 1800}},
 ]
 
 
-def main():
-    req = json.load(sys.stdin)
-    op, args, values = req["op"], req.get("args", {}), req["config"]["values"]
+class DriverError(Exception):
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+
+
+def state_file(root):
+    # Per-workspace state, standing in for the platform's own instancer.
+    return os.path.join(root, ".ctfx", "state", "example-instance.json")
+
+
+def find(cid):
+    for c in CHALLENGES:
+        if c["id"] == cid or c["name"] == cid:
+            return c
+    raise DriverError("not_found", f"challenge {cid} not found")
+
+
+def instance(root, action, cid):
+    ch = find(cid)
+    if "instance" not in ch:
+        raise DriverError("unsupported", f"challenge {cid} has no instance")
+    path = state_file(root)
+    running = os.path.exists(path)
+    if action in ("start", "reset"):
+        if running and action == "start":
+            pass  # the platform returns the existing instance
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"expires": int(time.time()) + 1800}, f)
+        running = True
+    elif action == "extend":
+        if not running:
+            return {"challenge": cid, "action": action, "state": "stopped", "message": "nothing to extend"}
+        with open(path, "w") as f:
+            json.dump({"expires": int(time.time()) + 1800}, f)
+    elif action == "stop":
+        if running:
+            os.remove(path)
+        return {"challenge": cid, "backend": "example", "action": action, "state": "stopped"}
+    if not running:
+        return {"challenge": cid, "backend": "example", "action": action, "state": "stopped"}
+    with open(path) as f:
+        exp = json.load(f)["expires"]
+    return {"challenge": cid, "backend": "example", "action": action, "state": "running",
+            "connect": {"host": "heap.example.invalid:31337", "port": 31337,
+                        "command": "nc heap.example.invalid 31337"},
+            "expires": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp))}
+
+
+def main(req):
+    if req.get("protocol") != PROTOCOL:
+        raise DriverError("config", f"this driver speaks protocol {PROTOCOL}, got {req.get('protocol')}")
+    op, args = req["op"], req.get("args", {})
+    values, root = req["config"]["values"], req["config"]["root"]
     if op == "capabilities":
-        return {"challenges": True, "submit": True, "scoreboard": True}
+        return {"protocol": PROTOCOL, "challenges": True, "submit": True, "scoreboard": True,
+                "hints": True, "instances": True,
+                "instance_actions": ["start", "extend", "stop", "reset"], "max_instances": 1}
     if op == "list_challenges":
         return CHALLENGES
     if op == "get_challenge":
-        for c in CHALLENGES:
-            if c["id"] == args["id"]:
-                return c
-        raise LookupError(f"challenge {args['id']} not found")
+        return find(args["id"])
+    if op == "hints":
+        return find(args["challenge_id"]).get("hints", [])
     if op == "submit":
+        find(args["id"])
         good = values.get("EXAMPLE_FLAG", "flag{example}")
         status = "correct" if args["flag"] == good else "incorrect"
-        return {"challenge_id": args["id"], "status": status, "message": status}
+        return {"challenge_id": args["id"], "status": status, "correct": status == "correct", "message": status}
     if op == "scoreboard":
         return {"total": 1, "entries": [{"position": 1, "account_id": "t1", "name": "team", "score": 150}]}
-    return None  # unreachable for ops not advertised in capabilities
+    if op == "instance":
+        return instance(root, args["action"], args["challenge"])
+    raise DriverError("unsupported", f"op {op} is not supported")
 
 
 if __name__ == "__main__":
     try:
-        out = {"result": main()}
-    except LookupError as e:
-        out = {"error": {"kind": "not_found", "message": str(e)}}
-    except Exception as e:  # noqa: BLE001 - report everything as a remote error
+        out = {"result": main(json.load(sys.stdin))}
+    except DriverError as e:
+        out = {"error": {"kind": e.kind, "message": str(e)}}
+    except Exception as e:  # noqa: BLE001 - report everything else as a remote error
         out = {"error": {"kind": "remote", "message": str(e)}}
     json.dump(out, sys.stdout)

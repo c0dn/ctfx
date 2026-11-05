@@ -8,22 +8,43 @@ import (
 	"fmt"
 )
 
+// Protocol is the ctfx data contract version: the exec plugin protocol and
+// the JSON shapes in this package. There is one version; older drivers are
+// refused.
+const Protocol = 2
+
 // Challenge is a normalized challenge record. IDs are always strings because
 // several platforms use opaque identifiers.
 type Challenge struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name"`
-	Category    string         `json:"category"`
-	Author      string         `json:"author,omitempty"`
-	Points      *float64       `json:"points"`
-	Solved      bool           `json:"solved"`
-	Solves      *int           `json:"solves"`
-	Description string         `json:"description,omitempty"`
-	Connection  string         `json:"connection,omitempty"`
-	Files       []File         `json:"files,omitempty"`
-	Hints       []Hint         `json:"hints,omitempty"`
-	Instance    *InstanceRef   `json:"instance,omitempty"`
-	Extra       map[string]any `json:"extra,omitempty"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Category    string   `json:"category"`
+	Author      string   `json:"author,omitempty"`
+	Points      *float64 `json:"points"`
+	Solved      bool     `json:"solved"`
+	Solves      *int     `json:"solves"`
+	Description string   `json:"description,omitempty"`
+	// Connection is the static target named by the challenge (not a per-team
+	// instance, which is Instance's job), parsed into host, port or URL.
+	Connection *Connect     `json:"connection,omitempty"`
+	Files      []File       `json:"files,omitempty"`
+	Hints      []Hint       `json:"hints,omitempty"`
+	Instance   *InstanceRef `json:"instance,omitempty"`
+	// Limits are the platform's own per-challenge limits, when it states them.
+	Limits *ChallengeLimits `json:"limits,omitempty"`
+	// Extra holds platform-specific fields with no shared meaning. Consumers
+	// must not depend on it; anything with a shared meaning gets a real field.
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ChallengeLimits are a challenge's platform-side limits. Nil fields are unknown.
+type ChallengeLimits struct {
+	// MaxAttempts is the total number of submissions allowed (0 = unlimited).
+	MaxAttempts *int `json:"max_attempts,omitempty"`
+	// RemainingAttempts is how many submissions are left for our team.
+	RemainingAttempts *int `json:"remaining_attempts,omitempty"`
+	// Deadline is when the challenge stops accepting flags (RFC 3339 UTC).
+	Deadline string `json:"deadline,omitempty"`
 }
 
 // File is a downloadable challenge attachment.
@@ -45,6 +66,8 @@ type Hint struct {
 type InstanceRef struct {
 	Backend string `json:"backend"`
 	Slug    string `json:"slug"`
+	// Lifetime is how long a fresh instance lives, in seconds, when known.
+	Lifetime int `json:"lifetime_seconds,omitempty"`
 }
 
 // Submission statuses shared across platforms.
@@ -59,13 +82,21 @@ const (
 	StatusError         = "error"
 )
 
+// SubmitStatuses lists every valid SubmitResult.Status.
+var SubmitStatuses = []string{StatusCorrect, StatusIncorrect, StatusAlreadySolved, StatusRateLimited,
+	StatusBadChallenge, StatusNotStarted, StatusEnded, StatusError}
+
 // SubmitResult is the verdict for a flag submission. A wrong flag is not an
 // error: it is a result with Status "incorrect".
 type SubmitResult struct {
-	ChallengeID  string `json:"challenge_id"`
-	Status       string `json:"status"`
-	Correct      bool   `json:"correct"`
-	Message      string `json:"message"`
+	ChallengeID string `json:"challenge_id"`
+	// Status is one of SubmitStatuses.
+	Status  string `json:"status"`
+	Correct bool   `json:"correct"`
+	Message string `json:"message"`
+	// RetryAfter is how many seconds to wait before submitting again, set with
+	// rate_limited when the platform says (Retry-After header or body).
+	RetryAfter   int    `json:"retry_after_seconds,omitempty"`
 	HTTPStatus   int    `json:"http_status,omitempty"`
 	ResponseKind string `json:"response_kind,omitempty"`
 }
@@ -128,24 +159,53 @@ type TeamStatus struct {
 	TeamError string   `json:"team_error,omitempty"`
 }
 
-// Instance is the state of a per-team challenge instance.
+// Instance states. Every Instance.State is one of these.
+const (
+	// InstanceRunning: up and reachable at Connect.
+	InstanceRunning = "running"
+	// InstancePending: being created, reset or stopped; poll status again.
+	InstancePending = "pending"
+	// InstanceStopped: no instance exists for the team (never started,
+	// stopped, or expired).
+	InstanceStopped = "stopped"
+	// InstanceBusy: the instancer refused for capacity or a rate limit;
+	// retry after RetryAfter seconds when set.
+	InstanceBusy = "busy"
+	// InstanceUnknown: the platform cannot tell (e.g. no session to ask with).
+	InstanceUnknown = "unknown"
+	// InstanceError: the platform reported a failure; see Message.
+	InstanceError = "error"
+)
+
+// InstanceStates lists every valid Instance.State.
+var InstanceStates = []string{InstanceRunning, InstancePending, InstanceStopped, InstanceBusy, InstanceUnknown, InstanceError}
+
+// Instance is the state of a per-team challenge instance after an action.
 type Instance struct {
-	Challenge  string   `json:"challenge"`
-	Backend    string   `json:"backend,omitempty"`
-	Action     string   `json:"action"`
-	Status     string   `json:"status"`
-	Host       string   `json:"host,omitempty"`
-	Expires    string   `json:"expires,omitempty"`
-	Owner      string   `json:"owner,omitempty"`
-	Connect    *Connect `json:"connect,omitempty"`
-	Message    string   `json:"message,omitempty"`
-	HTTPStatus int      `json:"http_status,omitempty"`
+	Challenge string `json:"challenge"`
+	Backend   string `json:"backend,omitempty"`
+	// Action is the action that produced this state.
+	Action string `json:"action"`
+	// State is one of InstanceStates.
+	State string `json:"state"`
+	// Connect is how to reach a running instance.
+	Connect *Connect `json:"connect,omitempty"`
+	// Expires is when the instance stops on its own (RFC 3339 UTC), if known.
+	Expires    string `json:"expires,omitempty"`
+	Owner      string `json:"owner,omitempty"`
+	RetryAfter int    `json:"retry_after_seconds,omitempty"`
+	Message    string `json:"message,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
-// Connect is suggested connection information for an instance.
+// Connect is how to reach a target. Host is "host" or "host:port"; URL is set
+// for web targets; Command is a ready-to-run client line (nc, openssl, ...).
+// At least one of Host or URL is set.
 type Connect struct {
-	Host    string `json:"host"`
+	Host    string `json:"host,omitempty"`
+	Port    int    `json:"port,omitempty"`
 	URL     string `json:"url,omitempty"`
+	TLS     bool   `json:"tls,omitempty"`
 	Command string `json:"command,omitempty"`
 }
 
@@ -167,6 +227,27 @@ type Capabilities struct {
 	Hints      bool `json:"hints"`
 	UnlockHint bool `json:"unlock_hint"`
 	Instances  bool `json:"instances"`
+	// InstanceActions lists the instance actions the platform supports, a
+	// subset of InstanceActions (status is implied by Instances).
+	InstanceActions []string `json:"instance_actions,omitempty"`
+	// MaxInstances is how many instances the team may run at once (0 = unknown).
+	MaxInstances int `json:"max_instances,omitempty"`
+}
+
+// Supports reports whether action is an advertised instance action.
+func (c Capabilities) Supports(action string) bool {
+	if !c.Instances {
+		return false
+	}
+	if action == InstanceStatus {
+		return true
+	}
+	for _, a := range c.InstanceActions {
+		if a == action {
+			return true
+		}
+	}
+	return false
 }
 
 // Driver is one CTF platform. Unsupported operations return an *Error with
@@ -191,7 +272,13 @@ const (
 	InstanceStart  = "start"
 	InstanceExtend = "extend"
 	InstanceStop   = "stop"
+	// InstanceReset recreates the instance with fresh state. Drivers whose
+	// platform has no reset get it as stop then start (see ResetByRestart).
+	InstanceReset = "reset"
 )
+
+// InstanceActions lists every instance action.
+var InstanceActions = []string{InstanceStatus, InstanceStart, InstanceExtend, InstanceStop, InstanceReset}
 
 // Unsupported implements every Driver method as unsupported.
 type Unsupported struct{}
@@ -236,13 +323,22 @@ func (Unsupported) Instance(context.Context, string, string) (*Instance, error) 
 type Kind string
 
 const (
-	KindUsage       Kind = "usage"
-	KindConfig      Kind = "config"
-	KindAuth        Kind = "auth"
+	KindUsage  Kind = "usage"
+	KindConfig Kind = "config"
+	// KindAuth: the credentials are wrong or not allowed (fix the profile).
+	KindAuth Kind = "auth"
+	// KindExpired: the credentials were accepted before but the session has
+	// expired (refresh the cookie/token, e.g. by signing in again).
+	KindExpired     Kind = "expired"
 	KindUnsupported Kind = "unsupported"
 	KindNotFound    Kind = "not_found"
-	KindRemote      Kind = "remote"
+	// KindTimeout: the platform or driver did not answer in time.
+	KindTimeout Kind = "timeout"
+	KindRemote  Kind = "remote"
 )
+
+// Kinds lists every error kind.
+var Kinds = []Kind{KindUsage, KindConfig, KindAuth, KindExpired, KindUnsupported, KindNotFound, KindTimeout, KindRemote}
 
 // Error is a classified error.
 type Error struct {

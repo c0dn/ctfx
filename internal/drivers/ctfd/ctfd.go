@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/c0dn/ctfx/internal/core"
 	"github.com/c0dn/ctfx/internal/driver"
@@ -113,7 +114,8 @@ func New(env *driver.Env) (ctf.Driver, error) {
 
 func (d *Driver) Capabilities() ctf.Capabilities {
 	return ctf.Capabilities{Challenges: true, Submit: true, Solves: true, Scoreboard: true, Team: true,
-		Download: true, Hints: true, UnlockHint: true, Instances: true}
+		Download: true, Hints: true, UnlockHint: true, Instances: true,
+		InstanceActions: []string{ctf.InstanceStart, ctf.InstanceExtend, ctf.InstanceStop, ctf.InstanceReset}}
 }
 
 func (d *Driver) resolveAuth(pluginRoute bool) (authMode, error) {
@@ -238,10 +240,17 @@ func (d *Driver) mapChallenge(r map[string]any) ctf.Challenge {
 		Solved:      r["solved_by_me"] == true,
 		Solves:      core.Int(r["solves"]),
 		Description: core.Str(r["description"]),
-		Connection:  core.Str(r["connection_info"]),
+		Connection:  ctf.ParseConnect(core.Str(r["connection_info"])),
+	}
+	if n := core.Int(r["max_attempts"]); n != nil && *n > 0 {
+		ch.Limits = &ctf.ChallengeLimits{MaxAttempts: n}
+		if a := core.Int(r["attempts"]); a != nil {
+			left := max(0, *n-*a)
+			ch.Limits.RemainingAttempts = &left
+		}
 	}
 	extra := map[string]any{}
-	for _, k := range []string{"type", "state", "max_attempts", "requirements", "template_name", "tags"} {
+	for _, k := range []string{"type", "state", "requirements", "template_name", "tags"} {
 		if v, ok := r[k]; ok && v != nil {
 			extra[k] = v
 		}
@@ -365,6 +374,7 @@ func (d *Driver) Submit(ctx context.Context, id, flag string) (*ctf.SubmitResult
 		res.Status = submitStatus[raw]
 	case resp.Status == 429:
 		res.Status = ctf.StatusRateLimited
+		res.RetryAfter = core.RetryAfter(resp.Header)
 	case resp.Status == 404:
 		res.Status = ctf.StatusBadChallenge
 	case resp.Status == 403:
@@ -542,6 +552,8 @@ func (d *Driver) UnlockHint(ctx context.Context, hintID string) (*ctf.Hint, erro
 // default; whale, owl, and chall-manager are common CTFd instancer plugins.
 func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.Instance, error) {
 	switch action {
+	case ctf.InstanceReset:
+		return ctf.ResetByRestart(ctx, d, challenge)
 	case ctf.InstanceStatus, ctf.InstanceStart, ctf.InstanceExtend, ctf.InstanceStop:
 	default:
 		return nil, ctf.Errorf(ctf.KindUsage, "unknown instance action %q", action)
@@ -607,35 +619,44 @@ func (d *Driver) pluginInstance(ctx context.Context, action, backend, challenge 
 	}
 	inst := &ctf.Instance{Challenge: challenge, Backend: backend, Action: action, HTTPStatus: resp.Status}
 	inst.Message = firstNonEmpty(core.Str(payload["message"]), core.Str(payload["error"]))
-	inst.Expires = firstNonEmpty(core.Str(data["expires"]), core.Str(data["end_time"]), core.Str(data["remaining_time"]))
+	inst.Expires = ctf.Timestamp(firstNonNil(data["expires"], data["end_time"]))
+	if inst.Expires == "" {
+		if left := core.Num(data["remaining_time"]); left != nil && *left > 0 {
+			inst.Expires = ctf.ExpiresIn(time.Duration(*left) * time.Second)
+		}
+	}
 	host := firstNonEmpty(core.Str(data["host"]), core.Str(data["domain"]), core.Str(data["lan_domain"]), core.Str(data["ip"]), core.Str(data["remote"]), core.Str(data["connect"]))
 	if port := core.Str(data["port"]); host != "" && port != "" && !strings.Contains(host, ":") {
 		host += ":" + port
 	}
-	inst.Host = host
+	if host != "" {
+		if h, p, found := strings.Cut(host, ":"); found {
+			inst.Connect = ctf.HostPortConnect(h, p)
+		} else {
+			inst.Connect = ctf.URLConnect("http://" + host)
+		}
+	}
 	ok := resp.Status < 400
 	switch {
+	case action == ctf.InstanceStop && ok:
+		inst.State, inst.Connect = ctf.InstanceStopped, nil
 	case action == ctf.InstanceStatus && (resp.Status == 404 || (ok && host == "" && inst.Message == "")):
-		inst.Status, inst.Message = "not_started", firstNonEmpty(inst.Message, "instance not started")
+		inst.State, inst.Message = ctf.InstanceStopped, firstNonEmpty(inst.Message, "instance not started")
+	case resp.Status == 429:
+		inst.State, inst.RetryAfter = ctf.InstanceBusy, core.RetryAfter(resp.Header)
 	case !ok:
-		inst.Status = "error"
+		inst.State = ctf.InstanceError
 		if inst.Message == "" {
 			inst.Message = core.Truncate(string(resp.Body), 300)
 		}
-	default:
-		inst.Status = map[string]string{ctf.InstanceStatus: "running", ctf.InstanceStart: "started", ctf.InstanceExtend: "extended", ctf.InstanceStop: "terminated"}[action]
-		// Surface the raw fields when we could not identify a host.
-		if host == "" && inst.Message == "" && action != ctf.InstanceStop && len(data) > 0 {
+	case inst.Connect == nil:
+		// Accepted but no endpoint yet (the container is still coming up).
+		inst.State = ctf.InstancePending
+		if inst.Message == "" && len(data) > 0 {
 			inst.Message = core.Truncate(string(resp.Body), 300)
 		}
-	}
-	if host != "" {
-		inst.Connect = &ctf.Connect{Host: host}
-		if h, p, found := strings.Cut(host, ":"); found {
-			inst.Connect.Command = "nc " + h + " " + p
-		} else {
-			inst.Connect.URL = "http://" + host
-		}
+	default:
+		inst.State = ctf.InstanceRunning
 	}
 	return inst, nil
 }
@@ -683,33 +704,44 @@ func (d *Driver) kubeInstance(ctx context.Context, action, challenge string) (*c
 	resp.JSON(&payload)
 	inst := &ctf.Instance{Challenge: slug, Backend: "kubectf", Action: action, HTTPStatus: resp.Status}
 	dep := core.Obj(payload["deployment"])
-	inst.Host, inst.Expires, inst.Owner = core.Str(dep["host"]), core.Str(dep["expires"]), core.Str(dep["owner"])
+	host := core.Str(dep["host"])
+	inst.Expires, inst.Owner = ctf.Timestamp(dep["expires"]), core.Str(dep["owner"])
 	ok := resp.Status < 400
 	inst.Message = firstNonEmpty(core.Str(payload["message"]), core.Str(payload["error"]))
+	if host != "" {
+		// KubeCTF fronts every instance with TLS on 443 (web by SNI, pwn over openssl).
+		inst.Connect = &ctf.Connect{Host: host, Port: 443, TLS: true, URL: "https://" + host}
+		if strings.Contains(host, "pwn") {
+			inst.Connect.Command = "openssl s_client -quiet -connect " + host + ":443"
+		}
+	}
 	switch {
+	case action == ctf.InstanceStop && ok:
+		inst.State, inst.Connect = ctf.InstanceStopped, nil
 	case action == ctf.InstanceStatus && resp.Status == 404:
-		inst.Status, inst.Message = "not_started", firstNonEmpty(inst.Message, "instance not started")
-	case !ok || (action != ctf.InstanceStop && inst.Host == ""):
-		inst.Status = "error"
+		inst.State, inst.Message = ctf.InstanceStopped, firstNonEmpty(inst.Message, "instance not started")
+	case resp.Status == 429:
+		inst.State, inst.RetryAfter = ctf.InstanceBusy, core.RetryAfter(resp.Header)
+	case !ok:
+		inst.State = ctf.InstanceError
 		if inst.Message == "" {
 			inst.Message = core.Truncate(string(resp.Body), 200)
 		}
-	case action == ctf.InstanceStatus:
-		inst.Status = "running"
-	case action == ctf.InstanceStart:
-		inst.Status = "started"
-	case action == ctf.InstanceExtend:
-		inst.Status = "extended"
-	case action == ctf.InstanceStop:
-		inst.Status = "terminated"
-	}
-	if inst.Host != "" {
-		inst.Connect = &ctf.Connect{Host: inst.Host, URL: "https://" + inst.Host}
-		if strings.Contains(inst.Host, "pwn") {
-			inst.Connect.Command = "openssl s_client -quiet -connect " + inst.Host + ":443"
-		}
+	case host == "":
+		inst.State = ctf.InstancePending
+	default:
+		inst.State = ctf.InstanceRunning
 	}
 	return inst, nil
+}
+
+func firstNonNil(vs ...any) any {
+	for _, v := range vs {
+		if v != nil && v != "" {
+			return v
+		}
+	}
+	return nil
 }
 
 func firstNonEmpty(vs ...string) string {

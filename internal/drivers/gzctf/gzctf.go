@@ -127,7 +127,8 @@ func New(env *driver.Env) (ctf.Driver, error) {
 
 func (d *Driver) Capabilities() ctf.Capabilities {
 	return ctf.Capabilities{Challenges: true, Submit: true, Solves: true, Scoreboard: true, Team: true,
-		Download: true, Hints: true, Instances: true}
+		Download: true, Hints: true, Instances: true,
+		InstanceActions: []string{ctf.InstanceStart, ctf.InstanceExtend, ctf.InstanceStop, ctf.InstanceReset}}
 }
 
 // reqResponse is GZCTF's RequestResponse error body.
@@ -465,12 +466,16 @@ func (d *Driver) GetChallenge(ctx context.Context, id string) (*ctf.Challenge, e
 	}
 	ch := &ctf.Challenge{ID: strconv.Itoa(c.ID), Name: c.Title, Category: c.Category, Points: f64(c.Score),
 		Description: c.Content, Hints: mapHints(c.Hints)}
-	ch.Extra = map[string]any{"type": c.Type, "attempts": c.Attempts}
-	if c.Limit > 0 {
-		ch.Extra["submission_limit"] = c.Limit
-	}
-	if c.Deadline != nil {
-		ch.Extra["deadline"] = *c.Deadline
+	ch.Extra = map[string]any{"type": c.Type}
+	if c.Limit > 0 || c.Deadline != nil {
+		ch.Limits = &ctf.ChallengeLimits{}
+		if c.Limit > 0 {
+			limit, left := c.Limit, max(0, c.Limit-c.Attempts)
+			ch.Limits.MaxAttempts, ch.Limits.RemainingAttempts = &limit, &left
+		}
+		if c.Deadline != nil {
+			ch.Limits.Deadline = ctf.Timestamp(*c.Deadline)
+		}
 	}
 	if u := deref(c.Context.URL); u != "" {
 		if full, err := core.JoinURL(d.base, u); err == nil {
@@ -482,16 +487,7 @@ func (d *Driver) GetChallenge(ctx context.Context, id string) (*ctf.Challenge, e
 	}
 	if isContainer(c.Type) {
 		ch.Instance = &ctf.InstanceRef{Backend: "gzctf", Slug: ch.ID}
-		if e := deref(c.Context.InstanceEntry); e != "" {
-			cn := d.connect(e)
-			ch.Connection = cn.Host
-			if ch.Connection == "" {
-				ch.Connection = cn.URL
-			}
-		}
-		if t := deref(c.Context.CloseTime); t != "" {
-			ch.Extra["instance_expires"] = t
-		}
+		// A running instance's entry belongs to Instance (ctfx instance status), not to the static connection.
 	}
 	// Solve count and solved state live only in the game details; best effort.
 	if g, err := d.details(ctx); err == nil {
@@ -581,6 +577,7 @@ func (d *Driver) Submit(ctx context.Context, id, flag string) (*ctf.SubmitResult
 			return nil, ctf.Errorf(ctf.KindAuth, "GZCTF submit denied: %s", e.Title)
 		case resp.Status == 429:
 			res.Status = ctf.StatusRateLimited
+			res.RetryAfter = core.RetryAfter(resp.Header)
 		case resp.Status == 404:
 			res.Status = ctf.StatusBadChallenge
 		case e.Status == codeGameNotStarted:
@@ -762,10 +759,15 @@ func (d *Driver) PrepareDownload(ctx context.Context, fileURL string) (*ctf.Down
 // container GUID when the platform proxies traffic over WebSocket.
 func (d *Driver) connect(entry string) *ctf.Connect {
 	if host, port, ok := strings.Cut(entry, ":"); ok && !strings.Contains(port, ":") {
-		return &ctf.Connect{Host: entry, Command: "nc " + host + " " + port}
+		return ctf.HostPortConnect(host, port)
 	}
 	ws := strings.Replace(d.base, "http", "ws", 1) + "/api/Proxy/" + url.PathEscape(entry)
-	return &ctf.Connect{URL: ws, Command: "wsrx connect " + ws}
+	c := ctf.URLConnect(ws)
+	if c == nil {
+		c = &ctf.Connect{URL: ws}
+	}
+	c.Command = "wsrx connect " + ws
+	return c
 }
 
 // Instance manages a container challenge. challenge is the numeric challenge ID.
@@ -785,15 +787,17 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 		}
 		inst.HTTPStatus = 200
 		if e := deref(c.Context.InstanceEntry); e != "" {
-			inst.Status, inst.Host, inst.Expires = "running", e, deref(c.Context.CloseTime)
+			inst.State, inst.Expires = ctf.InstanceRunning, ctf.Timestamp(deref(c.Context.CloseTime))
 			inst.Connect = d.connect(e)
 		} else {
-			inst.Status, inst.Message = "not_started", "instance not started"
+			inst.State, inst.Message = ctf.InstanceStopped, "instance not started"
 		}
 		return inst, nil
 	}
 	method, path := http.MethodPost, d.gamePath("Container", id)
 	switch action {
+	case ctf.InstanceReset:
+		return ctf.ResetByRestart(ctx, d, id)
 	case ctf.InstanceStart:
 	case ctf.InstanceExtend:
 		path += "/Extend"
@@ -808,29 +812,31 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 	}
 	inst.HTTPStatus = resp.Status
 	if resp.Status >= 400 {
-		inst.Status, inst.Message = "error", errBody(resp).Title
+		inst.State, inst.Message = ctf.InstanceError, errBody(resp).Title
+		if resp.Status == 429 {
+			inst.State, inst.RetryAfter = ctf.InstanceBusy, core.RetryAfter(resp.Header)
+		}
 		return inst, nil
 	}
-	switch action {
-	case ctf.InstanceStop:
-		inst.Status = "terminated"
+	if action == ctf.InstanceStop {
+		inst.State = ctf.InstanceStopped
 		return inst, nil
-	case ctf.InstanceStart:
-		inst.Status = "started"
-	case ctf.InstanceExtend:
-		inst.Status = "extended"
 	}
 	var ci containerInfo
 	if !resp.JSON(&ci) {
 		return nil, ctf.Errorf(ctf.KindRemote, "GZCTF %s returned unexpected data: %s", path, core.Truncate(string(resp.Body), 200))
 	}
-	inst.Expires = ci.ExpectStopAt
-	if ci.Status != "" && ci.Status != "Running" {
-		inst.Message = "container status: " + ci.Status
-	}
+	inst.Expires = ctf.Timestamp(ci.ExpectStopAt)
 	if ci.Entry != "" {
-		inst.Host = ci.Entry
 		inst.Connect = d.connect(ci.Entry)
+	}
+	switch {
+	case ci.Status != "" && ci.Status != "Running":
+		inst.State, inst.Message = ctf.InstancePending, "container status: "+ci.Status
+	case inst.Connect == nil:
+		inst.State = ctf.InstancePending
+	default:
+		inst.State = ctf.InstanceRunning
 	}
 	return inst, nil
 }

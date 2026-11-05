@@ -35,7 +35,7 @@ npx @c0dn/ctfx --help                 # or: go install github.com/c0dn/ctfx/cmd/
 | read  | `caps`, `platforms`, `config show` | secrets are masked |
 | write | `submit <id\|name> [flag\|-] [--verify CMD] [--force]` | flag from stdin when omitted or `-`; see the ledger below |
 | write | `hint-unlock <hint-id>` | spends points |
-| write | `instance start\|extend\|stop <id\|slug>` | |
+| write | `instance start\|extend\|stop\|reset <id\|slug>` | reset is stop then start where the platform has none |
 | write | `fetch <id\|name> [-o DIR] [--force]`, `download <url> [-o PATH]` | writes stay inside the workspace |
 | write | `sync [--dir D] [--category C] [--unsolved] [--no-files] [--update-desc] [--watch [--interval N]]` | never overwrites an existing `desc.md` unless `--update-desc`; `--watch` polls for new waves |
 | write | `init <platform\|url> [--profile NAME]`, `config migrate` | a URL is autodetected; local files only |
@@ -49,8 +49,15 @@ substituted, `$FLAG`/`$CANDIDATE` are set); a non-zero exit blocks the submissio
 
 Exit codes: `0` ok (a wrong flag is also `0`: check `result.status`),
 `1` error, `2` usage, `3` config or auth, `4` the platform does not support
-the operation, `5` remote error or not found. In JSON mode, errors go to stderr
-as `{"error":{"kind","message","exit_code"}}`.
+the operation, `5` remote error or not found, `6` the session expired (refresh
+the cookie or token), `7` timeout. In JSON mode, errors go to stderr as
+`{"error":{"kind","message","exit_code"}}`.
+
+Output follows one data contract across platforms: instance `state` is one of
+`running`, `pending`, `stopped`, `busy`, `unknown`, `error`; times are RFC 3339
+UTC; connection info is structured (`host`, `port`, `url`, `tls`, `command`);
+platform limits are in `limits`. See [docs/plugins.md](docs/plugins.md) for
+every field.
 
 Submit statuses: `correct`, `incorrect`, `already_solved`, `rate_limited`,
 `bad_challenge`, `not_started`, `ended`, `error`.
@@ -63,7 +70,7 @@ automatically; with more than one, choose with `--profile` or `CTFX_PROFILE`.
 Keys use the platform's prefix (`CTFD_URL`, `RCTF_TEAM_TOKEN`, ...), and
 generic `CTFX_<KEY>` names are used as fallbacks. A non-empty environment
 variable overrides the file. When a profile's name is not a platform name, set
-`CTFX_PLATFORM=<platform>` in the file.
+`CTFX_PLATFORM=<platform>` in the file. `CTFX_TIMEOUT` (seconds, default 60) bounds each exec-plugin call.
 
 Existing ocws workspaces keep working: `.opencode/ctf/<platform>.env` is read
 if there is no `.ctfx/` directory. `ctfx config migrate` copies those files
@@ -107,9 +114,12 @@ with whoever needs it, and ctfx does not need a release for it.
 
 To add a platform, put an executable named `ctfx-driver-<name>` on `PATH` or
 in `.ctfx/drivers/`. It receives one JSON request on stdin and writes one JSON
-response to stdout. See [docs/plugins.md](docs/plugins.md) and the ~50-line
-Python example in [examples/drivers](examples/drivers/ctfx-driver-example).
+response to stdout (protocol 2). [docs/plugins.md](docs/plugins.md) is the
+field-level reference; [examples/drivers](examples/drivers/ctfx-driver-example)
+is a complete Python driver with hints, limits and an instance lifecycle.
 
 ## Go API
 
-`pkg/ctf` exports the normalized types and the `Driver` interface.
+`pkg/ctf` exports the normalized types, the `Driver` interface, the contract
+validators (`Checked`, `ValidateInstance`, ...) and helpers for drivers
+(`ParseConnect`, `Timestamp`, `ResetByRestart`).

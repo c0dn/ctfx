@@ -185,11 +185,11 @@ func TestKubeCTFSessionAuthAndCSRF(t *testing.T) {
 	if last.cookie != "session=sess" || last.csrf != "csrf" || last.auth != "" || last.body["action"] != "create" {
 		t.Fatalf("plugin request: %+v", last)
 	}
-	if inst.Status != "started" || inst.Owner != "7" || inst.Connect == nil || inst.Connect.Command == "" {
+	if inst.State != ctf.InstanceRunning || inst.Owner != "7" || inst.Connect == nil || inst.Connect.Command == "" {
 		t.Fatalf("instance: %+v", inst)
 	}
 	st, err := d.Instance(context.Background(), ctf.InstanceStatus, "missing-slug")
-	if err != nil || st.Status != "not_started" {
+	if err != nil || st.State != ctf.InstanceStopped {
 		t.Fatalf("status: %+v %v", st, err)
 	}
 }
@@ -205,7 +205,7 @@ func TestWhaleInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if start.Status != "started" || start.Backend != "whale" || start.Host != "10.0.0.1:30000" ||
+	if start.State != ctf.InstanceRunning || start.Backend != "whale" || start.Connect.Host != "10.0.0.1:30000" || start.Connect.Port != 30000 ||
 		start.Connect == nil || start.Connect.Command != "nc 10.0.0.1 30000" {
 		t.Fatalf("start: %+v (connect %+v)", start, start.Connect)
 	}
@@ -214,7 +214,7 @@ func TestWhaleInstance(t *testing.T) {
 		t.Fatalf("whale start body: %v", last.body)
 	}
 	st, err := d.Instance(context.Background(), ctf.InstanceStatus, "5")
-	if err != nil || st.Status != "not_started" {
+	if err != nil || st.State != ctf.InstanceStopped {
 		t.Fatalf("status: %+v %v", st, err)
 	}
 	if !strings.Contains(log[len(log)-1].query, "challenge_id=5") {

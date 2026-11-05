@@ -212,30 +212,30 @@ func TestInstanceLifecycle(t *testing.T) {
 	step := func(action, wantStatus string) *ctf.Instance {
 		t.Helper()
 		inst, err := d.Instance(ctx, action, "inst-chall")
-		if err != nil || inst.Status != wantStatus {
+		if err != nil || inst.State != wantStatus {
 			t.Fatalf("%s: got %+v %v", action, inst, err)
 		}
 		return inst
 	}
-	step(ctf.InstanceStatus, "not_started")
-	inst := step(ctf.InstanceStart, "starting")
-	if inst.Host != "fortune.inst15.ctf.example:1337" || inst.Connect == nil ||
+	step(ctf.InstanceStatus, ctf.InstanceStopped)
+	inst := step(ctf.InstanceStart, ctf.InstancePending)
+	if inst.Connect == nil || inst.Connect.Host != "fortune.inst15.ctf.example:1337" || !inst.Connect.TLS ||
 		inst.Connect.Command != "openssl s_client -quiet -connect fortune.inst15.ctf.example:1337" || inst.Expires == "" {
 		t.Fatalf("start: %+v (connect %+v)", inst, inst.Connect)
 	}
-	step(ctf.InstanceStatus, "running")
-	if inst := step(ctf.InstanceExtend, "running"); inst.Host != "fortune.inst15.ctf.example:1337" {
+	step(ctf.InstanceStatus, ctf.InstanceRunning)
+	if inst := step(ctf.InstanceExtend, ctf.InstanceRunning); inst.Connect.Host != "fortune.inst15.ctf.example:1337" {
 		t.Fatalf("extend: %+v", inst)
 	}
-	step(ctf.InstanceStop, "terminated")
-	step(ctf.InstanceStatus, "not_started")
+	step(ctf.InstanceStop, ctf.InstanceStopped)
+	step(ctf.InstanceStatus, ctf.InstanceStopped)
 
 	// A challenge the instancer does not manage reports not_started on status.
-	if inst, err := d.Instance(ctx, ctf.InstanceStatus, "plain-chall"); err != nil || inst.Status != "not_started" {
+	if inst, err := d.Instance(ctx, ctf.InstanceStatus, "plain-chall"); err != nil || inst.State != ctf.InstanceStopped {
 		t.Fatalf("plain status: %+v %v", inst, err)
 	}
 	// but surfaces the error for an action.
-	if inst, err := d.Instance(ctx, ctf.InstanceStart, "plain-chall"); err != nil || inst.Status != "error" {
+	if inst, err := d.Instance(ctx, ctf.InstanceStart, "plain-chall"); err != nil || inst.State != ctf.InstanceError {
 		t.Fatalf("plain start: %+v %v", inst, err)
 	}
 	if _, err := d.Instance(ctx, "bogus", "inst-chall"); ctf.KindOf(err) != ctf.KindUsage {
@@ -265,8 +265,8 @@ func TestChallengeInstanceFlag(t *testing.T) {
 	if err != nil || pwn.Instance == nil || pwn.Instance.Backend != "rctf" || pwn.Instance.Slug != "pwn1" {
 		t.Fatalf("pwn1: %+v %v", pwn, err)
 	}
-	if pwn.Extra["instance_lifetime_ms"] != int64(1800000) {
-		t.Fatalf("lifetime: %+v", pwn.Extra)
+	if pwn.Instance.Lifetime != 1800 {
+		t.Fatalf("lifetime: %+v", pwn.Instance)
 	}
 	cry, err := d.GetChallenge(context.Background(), "cry1")
 	if err != nil || cry.Instance != nil {

@@ -79,6 +79,13 @@ func (a *App) cmdCaps(args []string) error {
 		return err
 	}
 	caps := s.drv.Capabilities()
+	// An exec driver that failed its handshake (wrong protocol, bad JSON)
+	// reports the failure instead of an all-false capability set.
+	if h, ok := s.drv.(interface{ Err() error }); ok {
+		if err := h.Err(); err != nil {
+			return err
+		}
+	}
 	return a.emit(s, map[string]any{"capabilities": caps}, nil)
 }
 
@@ -143,8 +150,8 @@ func (a *App) cmdChalShow(ctx context.Context, args []string) error {
 		if ch.Author != "" {
 			fmt.Fprintln(w, "author:", ch.Author)
 		}
-		if ch.Connection != "" {
-			fmt.Fprintln(w, "connection:", ch.Connection)
+		if c := connectText(ch.Connection); c != "" {
+			fmt.Fprintln(w, "connection:", c)
 		}
 		if ch.Instance != nil {
 			fmt.Fprintf(w, "instance: %s (%s) - `ctfx instance start %s`\n", ch.Instance.Slug, ch.Instance.Backend, ch.ID)
@@ -328,9 +335,9 @@ func (a *App) cmdTeam(ctx context.Context, args []string) error {
 
 func (a *App) cmdInstance(ctx context.Context, action string, args []string) error {
 	switch action {
-	case ctf.InstanceStatus, ctf.InstanceStart, ctf.InstanceExtend, ctf.InstanceStop:
+	case ctf.InstanceStatus, ctf.InstanceStart, ctf.InstanceExtend, ctf.InstanceStop, ctf.InstanceReset:
 	default:
-		return usageError("usage: ctfx instance status|start|extend|stop <id|slug>")
+		return usageError("usage: ctfx instance status|start|extend|stop|reset <id|slug>")
 	}
 	pos, err := parse(a.flags("instance "+action), args)
 	if err != nil {
@@ -569,8 +576,8 @@ func renderDesc(platform string, ch *ctf.Challenge) string {
 	if ch.Author != "" {
 		fmt.Fprintf(&b, "- Author: %s\n", ch.Author)
 	}
-	if ch.Connection != "" {
-		fmt.Fprintf(&b, "- Connection: `%s`\n", ch.Connection)
+	if c := connectText(ch.Connection); c != "" {
+		fmt.Fprintf(&b, "- Connection: `%s`\n", c)
 	}
 	if ch.Instance != nil {
 		fmt.Fprintf(&b, "- Instance: %s (`ctfx instance start %s`)\n", ch.Instance.Backend, ch.ID)
@@ -960,4 +967,17 @@ func (a *App) cmdConfigMigrate(args []string) error {
 		items = append(items, it)
 	}
 	return a.emit(nil, map[string]any{"migrated": items}, nil)
+}
+
+// connectText is the most useful one-line form of a connection.
+func connectText(c *ctf.Connect) string {
+	switch {
+	case c == nil:
+		return ""
+	case c.Command != "":
+		return c.Command
+	case c.URL != "":
+		return c.URL
+	}
+	return c.Host
 }

@@ -293,21 +293,49 @@ func TestExecPlugin(t *testing.T) {
 	os.WriteFile(filepath.Join(root, ".ctfx", "example.env"), []byte("EXAMPLE_FLAG=flag{py}\n"), 0o600)
 
 	r := run(t, root, "", "platforms")
+	if r := run(t, root, "", "caps"); r.code != 0 || !strings.Contains(r.stdout, `"instance_actions"`) {
+		t.Fatalf("plugin caps: %d %s %s", r.code, r.stdout, r.stderr)
+	}
 	if !strings.Contains(r.stdout, `"example"`) {
 		t.Fatalf("plugin not listed: %s", r.stdout)
 	}
 	r = run(t, root, "", "chal", "ls")
-	if r.code != 0 || r.out["total"] != float64(2) || r.out["platform"] != "example" {
+	if r.code != 0 || r.out["total"] != float64(3) || r.out["platform"] != "example" {
 		t.Fatalf("plugin ls: %d %s %s", r.code, r.stdout, r.stderr)
 	}
 	r = run(t, root, "flag{py}", "submit", "baby-rsa")
 	if res, _ := r.out["result"].(map[string]any); r.code != 0 || res["status"] != "correct" || res["correct"] != true {
 		t.Fatalf("plugin submit: %d %s %s", r.code, r.stdout, r.stderr)
 	}
-	if r := run(t, root, "", "hint", "ls", "1"); r.code != ExitUnsupported {
+	if r := run(t, root, "", "hint", "ls", "2"); r.code != 0 {
+		t.Fatalf("plugin hints: %d %s", r.code, r.stderr)
+	}
+	if r := run(t, root, "", "scoreboard"); r.code != 0 {
+		t.Fatalf("plugin scoreboard: %d %s", r.code, r.stderr)
+	}
+	if r := run(t, root, "", "solves"); r.code != ExitUnsupported {
 		t.Fatalf("unadvertised op should exit 4: %d %s", r.code, r.stderr)
+	}
+	r = run(t, root, "", "instance", "reset", "3")
+	if inst, _ := r.out["instance"].(map[string]any); r.code != 0 || inst["state"] != "running" || inst["action"] != "reset" {
+		t.Fatalf("plugin reset: %d %s %s", r.code, r.stdout, r.stderr)
+	}
+	r = run(t, root, "", "instance", "stop", "3")
+	if inst, _ := r.out["instance"].(map[string]any); r.code != 0 || inst["state"] != "stopped" {
+		t.Fatalf("plugin stop: %d %s %s", r.code, r.stdout, r.stderr)
 	}
 	if r := run(t, root, "", "chal", "show", "404"); r.code != ExitRemote || !strings.Contains(r.stderr, "not_found") {
 		t.Fatalf("plugin not_found: %d %s", r.code, r.stderr)
+	}
+}
+
+func TestExecPluginOldProtocolRefused(t *testing.T) {
+	root := workspace(t, "")
+	os.MkdirAll(filepath.Join(root, ".ctfx", "drivers"), 0o755)
+	os.WriteFile(filepath.Join(root, ".ctfx", "drivers", "ctfx-driver-old"),
+		[]byte("#!/bin/sh\ncat >/dev/null\necho '{\"result\":{\"challenges\":true}}'\n"), 0o755)
+	os.WriteFile(filepath.Join(root, ".ctfx", "old.env"), []byte("CTFX_PLATFORM=old\n"), 0o600)
+	if r := run(t, root, "", "caps"); r.code != ExitConfig || !strings.Contains(r.stderr, "protocol 0") {
+		t.Fatalf("old-protocol caps: %d %s %s", r.code, r.stdout, r.stderr)
 	}
 }

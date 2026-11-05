@@ -4,7 +4,7 @@
 // allow reads and ask on writes by command prefix:
 //
 //	reads:  chal, hint ls, solves, scoreboard, team, instance status, caps, platforms, config show
-//	writes: submit, hint-unlock, instance start|extend|stop, fetch, download, sync, init, config migrate
+//	writes: submit, hint-unlock, instance start|extend|stop|reset, fetch, download, sync, init, config migrate
 package cli
 
 import (
@@ -34,6 +34,8 @@ const (
 	ExitConfig      = 3 // config or auth
 	ExitUnsupported = 4
 	ExitRemote      = 5 // remote error or not found
+	ExitExpired     = 6 // the session expired: refresh the cookie or token
+	ExitTimeout     = 7 // the platform or driver did not answer in time
 )
 
 // App holds per-invocation state.
@@ -72,7 +74,7 @@ Read commands:
 Write commands (mutate remote or local state):
   submit <id|name> [flag|-]                      submit a flag (stdin when omitted or -)
   hint-unlock <hint-id>                          spend points to unlock a hint
-  instance start|extend|stop <id|slug>           manage a per-team instance
+  instance start|extend|stop|reset <id|slug>     manage a per-team instance
   fetch <id|name> [-o DIR] [--force]             download a challenge's files
   download <url> [-o PATH]                       download one attachment URL
   sync [--dir challenges] [--category C] [--unsolved] [--no-files] [--update-desc] [--watch [--interval N]]
@@ -92,7 +94,8 @@ fingerprint to pass bot screening; CTFX_USER_AGENT and CTFX_COOKIES (eg a
 cf_clearance value) tune it further. These also work per-platform (CTFD_*, etc).
 
 Exit codes: 0 ok (including a wrong flag: check "status"), 1 error, 2 usage,
-3 config/auth, 4 unsupported by platform, 5 remote error or not found.
+3 config/auth, 4 unsupported by platform, 5 remote error or not found,
+6 session expired (refresh the cookie/token), 7 timeout.
 `
 
 // Run executes args and returns the exit code.
@@ -130,6 +133,10 @@ func (a *App) fail(err error) int {
 		code = ExitUnsupported
 	case ctf.KindNotFound, ctf.KindRemote:
 		code = ExitRemote
+	case ctf.KindExpired:
+		code = ExitExpired
+	case ctf.KindTimeout:
+		code = ExitTimeout
 	}
 	if a.jsonOut() {
 		if kind == "" {
@@ -324,6 +331,7 @@ func (a *App) open() (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+	drv = ctf.Checked(spec.Name, drv)
 	return &session{cfg: cfg, spec: spec, drv: drv, client: client}, nil
 }
 

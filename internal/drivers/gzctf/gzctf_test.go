@@ -344,25 +344,25 @@ func TestInstanceLifecycle(t *testing.T) {
 	step := func(action, wantStatus string) *ctf.Instance {
 		t.Helper()
 		inst, err := d.Instance(ctx, action, "13")
-		if err != nil || inst.Status != wantStatus {
+		if err != nil || inst.State != wantStatus {
 			t.Fatalf("%s: got %+v %v", action, inst, err)
 		}
 		return inst
 	}
-	step(ctf.InstanceStatus, "not_started")
-	inst := step(ctf.InstanceStart, "started")
-	if inst.Host != "10.0.0.5:31337" || inst.Connect.Command != "nc 10.0.0.5 31337" || inst.Expires == "" {
+	step(ctf.InstanceStatus, ctf.InstanceStopped)
+	inst := step(ctf.InstanceStart, ctf.InstanceRunning)
+	if inst.Connect.Host != "10.0.0.5:31337" || inst.Connect.Command != "nc 10.0.0.5 31337" || inst.Expires == "" {
 		t.Fatalf("start: %+v", inst)
 	}
-	if inst := step(ctf.InstanceStart, "error"); inst.Message != "Container already created" || inst.HTTPStatus != 400 {
+	if inst := step(ctf.InstanceStart, ctf.InstanceError); inst.Message != "Container already created" || inst.HTTPStatus != 400 {
 		t.Fatalf("restart: %+v", inst)
 	}
-	step(ctf.InstanceStatus, "running")
-	if inst := step(ctf.InstanceExtend, "extended"); inst.Expires != "2026-09-30T05:00:00Z" {
+	step(ctf.InstanceStatus, ctf.InstanceRunning)
+	if inst := step(ctf.InstanceExtend, ctf.InstanceRunning); inst.Expires != "2026-09-30T05:00:00Z" {
 		t.Fatalf("extend: %+v", inst)
 	}
-	step(ctf.InstanceStop, "terminated")
-	step(ctf.InstanceStatus, "not_started")
+	step(ctf.InstanceStop, ctf.InstanceStopped)
+	step(ctf.InstanceStatus, ctf.InstanceStopped)
 	if _, err := d.Instance(ctx, ctf.InstanceStatus, "11"); ctf.KindOf(err) != ctf.KindUnsupported {
 		t.Fatalf("non-container: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestInstanceLifecycle(t *testing.T) {
 func TestProxyEntry(t *testing.T) {
 	d := &Driver{base: "https://x.example/sub"}
 	c := d.connect("6f1b2c3d-0000-4000-8000-000000000000")
-	if c.URL != "wss://x.example/sub/api/Proxy/6f1b2c3d-0000-4000-8000-000000000000" || c.Host != "" {
+	if c.URL != "wss://x.example/sub/api/Proxy/6f1b2c3d-0000-4000-8000-000000000000" || c.Host != "x.example" || !c.TLS {
 		t.Fatalf("got %+v", c)
 	}
 }

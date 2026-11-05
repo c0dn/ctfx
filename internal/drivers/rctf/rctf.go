@@ -84,7 +84,8 @@ func New(env *driver.Env) (ctf.Driver, error) {
 }
 
 func (d *Driver) Capabilities() ctf.Capabilities {
-	return ctf.Capabilities{Challenges: true, Submit: true, Solves: true, Scoreboard: true, Team: true, Download: true, Instances: true}
+	return ctf.Capabilities{Challenges: true, Submit: true, Solves: true, Scoreboard: true, Team: true, Download: true, Instances: true,
+		InstanceActions: []string{ctf.InstanceStart, ctf.InstanceExtend, ctf.InstanceStop, ctf.InstanceReset}}
 }
 
 type envelope struct {
@@ -282,10 +283,7 @@ func (d *Driver) mapChallenge(c map[string]any, solved map[string]bool) ctf.Chal
 	if c["instancerLifetime"] != nil {
 		ch.Instance = &ctf.InstanceRef{Backend: "rctf", Slug: ch.ID}
 		if ms := core.Num(c["instancerLifetime"]); ms != nil {
-			if ch.Extra == nil {
-				ch.Extra = map[string]any{}
-			}
-			ch.Extra["instance_lifetime_ms"] = int64(*ms)
+			ch.Instance.Lifetime = int(*ms / 1000)
 		}
 	}
 	return ch
@@ -493,6 +491,8 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 	id := strings.TrimSpace(challenge)
 	method := ""
 	switch action {
+	case ctf.InstanceReset:
+		return ctf.ResetByRestart(ctx, d, id)
 	case ctf.InstanceStatus:
 		method = http.MethodGet
 	case ctf.InstanceStart:
@@ -550,10 +550,14 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 		_ = json.Unmarshal(env.Data, &e)
 		msg := firstNonEmpty(e.Message, env.Message, env.Kind)
 		if action == ctf.InstanceStatus && strings.Contains(strings.ToLower(msg), "not configured") {
-			inst.Status, inst.Message = "not_started", msg
+			inst.State, inst.Message = ctf.InstanceStopped, msg
 			return inst, nil
 		}
-		inst.Status, inst.Message = "error", msg
+		inst.State, inst.Message = ctf.InstanceError, msg
+		if resp.Status == 429 {
+			inst.State = ctf.InstanceBusy
+			inst.RetryAfter = core.RetryAfter(resp.Header)
+		}
 		return inst, nil
 	}
 
@@ -564,33 +568,29 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 		}
 	}
 	if st.TimeLeftMilliseconds != nil {
-		inst.Expires = time.Now().UTC().Add(time.Duration(*st.TimeLeftMilliseconds) * time.Millisecond).Format(time.RFC3339)
+		inst.Expires = ctf.ExpiresIn(time.Duration(*st.TimeLeftMilliseconds) * time.Millisecond)
 	}
 	if ep := pickEndpoint(st.Endpoints); ep != nil {
-		inst.Host = ep.Host
-		if ep.Port != 0 {
-			inst.Host = ep.Host + ":" + strconv.Itoa(ep.Port)
-		}
 		inst.Connect = connectFor(ep)
 	}
 
 	switch st.Status {
 	case "stopped", "":
-		switch action {
-		case ctf.InstanceStop:
-			inst.Status = "terminated"
-		case ctf.InstanceStatus:
-			inst.Status, inst.Message = "not_started", firstNonEmpty(inst.Message, "instance not started")
-		default:
-			// A start/extend that still reports stopped did not take effect.
-			inst.Status = "stopped"
+		inst.State = ctf.InstanceStopped
+		if action == ctf.InstanceStart || action == ctf.InstanceExtend {
+			inst.Message = firstNonEmpty(inst.Message, "the instancer still reports the instance stopped")
 		}
 	case "errored":
-		inst.Status = "error"
+		inst.State = ctf.InstanceError
 		inst.Message = firstNonEmpty(inst.Message, "instancer reported an errored instance")
-	default:
-		// running, starting, stopping: report the real lifecycle state.
-		inst.Status = st.Status
+	case "running":
+		inst.State = ctf.InstanceRunning
+		if inst.Connect == nil {
+			inst.State, inst.Message = ctf.InstancePending, firstNonEmpty(inst.Message, "running but no endpoint yet")
+		}
+	default: // starting, stopping
+		inst.State = ctf.InstancePending
+		inst.Message = firstNonEmpty(inst.Message, "instance "+st.Status)
 	}
 	return inst, nil
 }
@@ -620,13 +620,14 @@ func connectFor(ep *instanceEndpoint) *ctf.Connect {
 	if ep.Port != 0 {
 		host = ep.Host + ":" + strconv.Itoa(ep.Port)
 	}
-	c := &ctf.Connect{Host: host, Command: ep.Text}
+	c := &ctf.Connect{Host: host, Port: ep.Port, Command: ep.Text}
 	switch ep.Kind {
 	case "http":
 		c.URL = "http://" + host
 	case "https":
-		c.URL = "https://" + host
+		c.URL, c.TLS = "https://"+host, true
 	case "tcp-ssl":
+		c.TLS = true
 		if c.Command == "" {
 			c.Command = "openssl s_client -quiet -connect " + ep.Host + ":" + strconv.Itoa(ep.Port)
 		}

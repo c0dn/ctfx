@@ -448,6 +448,24 @@ func Truncate(s string, n int) string {
 	return s
 }
 
+// RetryAfter returns the Retry-After header in seconds (delta or HTTP date),
+// or 0 when absent or unparseable.
+func RetryAfter(h http.Header) int {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return int(d.Seconds() + 0.5)
+		}
+	}
+	return 0
+}
+
 // StatusError maps a non-2xx status to a classified error.
 func StatusError(status int, what, msg string) error {
 	if msg == "" {
