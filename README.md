@@ -83,6 +83,12 @@ across.
 | `gzctf` | `GZCTF_URL` (or a `/games/<id>` URL), `GZCTF_GAME`, `GZCTF_TOKEN` or `GZCTF_USERNAME`+`GZCTF_PASSWORD` |
 | `htb` | `HTB_URL` (default `https://ctf.hackthebox.com`), `HTB_EVENT`, `HTB_TOKEN` (JWT) |
 
+CTFd boards that link handouts in the description instead of attaching them
+(an archive of past years, for one) get those links as files too: a Markdown
+or HTML link to the platform's own `/files/` path is listed by `chal files` and
+downloaded by `fetch`, with the platform's credentials. Links to other hosts
+or pages are left alone.
+
 ### Getting past bot screening
 
 Some platforms sit behind Cloudflare or a WAF. Set `CTFX_IMPERSONATE=chrome`

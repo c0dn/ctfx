@@ -102,6 +102,36 @@ func TestGetChallengeFilesAndHints(t *testing.T) {
 	}
 }
 
+// Boards that keep handouts in the description (Hack@UCF's archive) get them
+// as files: Markdown and HTML links to this platform's /files/, decoded,
+// once each. Other hosts, other paths and already-attached files are left out.
+func TestDescriptionLinksBecomeFiles(t *testing.T) {
+	var log []seen
+	srv := server(t, &log, map[string]func(http.ResponseWriter, seen){
+		"GET /api/v1/challenges/9": reply(`{"success":true,"data":{"id":9,"name":"ret","category":"pwn","value":100,
+			"description":"Get the flag.\n\n* [ret](/files/hackucf/Pwn/ret/ret)\n* [libc](/files/hackucf/Pwn/ret/libc.so.6 \"libc\")\n<a href=\"/files/a%20b/notes.txt?x=1&amp;y=2\">notes</a>\n[again](/files/hackucf/Pwn/ret/ret)\n[att](/files/abc/att.zip)\n[writeup](https://github.com/x/y/blob/main/ret)\n[rules](/rules)\n[dir](/files/hackucf/)",
+			"files":["/files/abc/att.zip"]}}`),
+	})
+	d := newDriver(t, srv, map[string]string{"CTFD_TOKEN": "tok"})
+	ch, err := d.GetChallenge(context.Background(), "9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range ch.Files {
+		got = append(got, f.Name+" "+strings.TrimPrefix(f.URL, srv.URL))
+	}
+	want := []string{"att.zip /files/abc/att.zip", "ret /files/hackucf/Pwn/ret/ret", "libc.so.6 /files/hackucf/Pwn/ret/libc.so.6", "notes.txt /files/a%20b/notes.txt?x=1&y=2"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("files:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// A description link downloads with the platform's credentials like an attachment.
+	dr, err := d.PrepareDownload(context.Background(), ch.Files[1].URL)
+	if err != nil || dr.Headers["Authorization"] != "Token tok" {
+		t.Fatalf("download request %+v %v", dr, err)
+	}
+}
+
 func TestSubmitMapping(t *testing.T) {
 	var log []seen
 	status := "incorrect"

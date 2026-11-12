@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -276,8 +278,42 @@ func (d *Driver) mapChallenge(r map[string]any) ctf.Challenge {
 		}
 		ch.Files = append(ch.Files, ctf.File{Name: core.FilenameFromURL(u), URL: u})
 	}
+	ch.Files = append(ch.Files, d.descriptionFiles(ch.Description, ch.Files)...)
 	ch.Hints = mapHints(core.Arr(r["hints"]))
 	return ch
+}
+
+// descLink matches a Markdown link or an href/src in an HTML description.
+var descLink = regexp.MustCompile(`\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)|(?:href|src)\s*=\s*["']([^"']+)["']`)
+
+// descriptionFiles are the handouts a description links instead of attaching:
+// boards that host every year's archive (Hack@UCF, for one) put "[bin](/files/...)"
+// in the text and leave CTFd's file list empty. Only links to this platform's
+// own /files/ path count, so writeups, repositories and other pages a
+// description mentions are never downloaded. Links already in have are skipped.
+func (d *Driver) descriptionFiles(desc string, have []ctf.File) []ctf.File {
+	seen := map[string]bool{}
+	for _, f := range have {
+		seen[f.URL] = true
+	}
+	var out []ctf.File
+	for _, m := range descLink.FindAllStringSubmatch(desc, -1) {
+		ref := m[1]
+		if ref == "" {
+			ref = m[2]
+		}
+		u, err := core.JoinURL(d.base, html.UnescapeString(ref))
+		if err != nil || !core.SameOrigin(u, d.base) || seen[u] {
+			continue
+		}
+		p, err := url.Parse(u)
+		if err != nil || !strings.HasPrefix(p.Path, "/files/") || strings.HasSuffix(p.Path, "/") {
+			continue
+		}
+		seen[u] = true
+		out = append(out, ctf.File{Name: core.FilenameFromURL(u), URL: u})
+	}
+	return out
 }
 
 func mapHints(raw []any) []ctf.Hint {
