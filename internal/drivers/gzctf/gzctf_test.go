@@ -406,3 +406,19 @@ func TestDetect(t *testing.T) {
 		t.Fatal("false positive")
 	}
 }
+
+// Newer GZCTF sends times as Unix milliseconds (or null); older ones as ISO
+// strings. Both decode, normalised to RFC 3339.
+func TestGzTime(t *testing.T) {
+	var v struct {
+		A gzTime `json:"a"`
+		B gzTime `json:"b"`
+		C gzTime `json:"c"`
+	}
+	if err := json.Unmarshal([]byte(`{"a":1794625532152,"b":"2026-09-30T01:02:03Z","c":null}`), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.A != "2026-11-14T03:05:32Z" || v.B != "2026-09-30T01:02:03Z" || v.C != "" {
+		t.Fatalf("%+v", v)
+	}
+}

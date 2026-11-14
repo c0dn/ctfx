@@ -316,7 +316,20 @@ type challengeInfo struct {
 	Category string  `json:"category"`
 	Score    float64 `json:"score"`
 	Solved   int     `json:"solved"`
-	Deadline string  `json:"deadline"`
+	Deadline gzTime  `json:"deadline"`
+}
+
+// gzTime is a GZCTF time: an ISO string on older servers, Unix milliseconds on
+// newer ones (or null). It holds RFC 3339 UTC, "" when unset.
+type gzTime string
+
+func (t *gzTime) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*t = gzTime(ctf.Timestamp(v))
+	return nil
 }
 
 type solvedItem struct {
@@ -324,7 +337,7 @@ type solvedItem struct {
 	Score    float64 `json:"score"`
 	Type     string  `json:"type"`
 	UserName string  `json:"userName"`
-	Time     string  `json:"time"`
+	Time     gzTime  `json:"time"`
 }
 
 type boardItem struct {
@@ -353,9 +366,9 @@ type challengeDetail struct {
 	Type     string   `json:"type"`
 	Limit    int      `json:"limit"`
 	Attempts int      `json:"attempts"`
-	Deadline *string  `json:"deadline"`
+	Deadline gzTime   `json:"deadline"`
 	Context  struct {
-		CloseTime     *string `json:"closeTime"`
+		CloseTime     gzTime  `json:"closeTime"`
 		InstanceEntry *string `json:"instanceEntry"`
 		URL           *string `json:"url"`
 		FileSize      *int64  `json:"fileSize"`
@@ -364,8 +377,8 @@ type challengeDetail struct {
 
 type containerInfo struct {
 	Status       string `json:"status"`
-	StartedAt    string `json:"startedAt"`
-	ExpectStopAt string `json:"expectStopAt"`
+	StartedAt    gzTime `json:"startedAt"`
+	ExpectStopAt gzTime `json:"expectStopAt"`
 	Entry        string `json:"entry"`
 }
 
@@ -467,14 +480,14 @@ func (d *Driver) GetChallenge(ctx context.Context, id string) (*ctf.Challenge, e
 	ch := &ctf.Challenge{ID: strconv.Itoa(c.ID), Name: c.Title, Category: c.Category, Points: f64(c.Score),
 		Description: c.Content, Hints: mapHints(c.Hints)}
 	ch.Extra = map[string]any{"type": c.Type}
-	if c.Limit > 0 || c.Deadline != nil {
+	if c.Limit > 0 || c.Deadline != "" {
 		ch.Limits = &ctf.ChallengeLimits{}
 		if c.Limit > 0 {
 			limit, left := c.Limit, max(0, c.Limit-c.Attempts)
 			ch.Limits.MaxAttempts, ch.Limits.RemainingAttempts = &limit, &left
 		}
-		if c.Deadline != nil {
-			ch.Limits.Deadline = ctf.Timestamp(*c.Deadline)
+		if c.Deadline != "" {
+			ch.Limits.Deadline = string(c.Deadline)
 		}
 	}
 	if u := deref(c.Context.URL); u != "" {
@@ -643,7 +656,7 @@ func (d *Driver) Solves(ctx context.Context) ([]ctf.Solve, error) {
 	for _, s := range g.Rank.SolvedChallenges {
 		c := infos[s.ID]
 		out = append(out, ctf.Solve{ChallengeID: strconv.Itoa(s.ID), Name: c.Title, Category: c.Category,
-			Points: f64(s.Score), Date: s.Time})
+			Points: f64(s.Score), Date: string(s.Time)})
 	}
 	return out, nil
 }
@@ -787,7 +800,7 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 		}
 		inst.HTTPStatus = 200
 		if e := deref(c.Context.InstanceEntry); e != "" {
-			inst.State, inst.Expires = ctf.InstanceRunning, ctf.Timestamp(deref(c.Context.CloseTime))
+			inst.State, inst.Expires = ctf.InstanceRunning, ctf.Timestamp(string(c.Context.CloseTime))
 			inst.Connect = d.connect(e)
 		} else {
 			inst.State, inst.Message = ctf.InstanceStopped, "instance not started"
@@ -826,7 +839,7 @@ func (d *Driver) Instance(ctx context.Context, action, challenge string) (*ctf.I
 	if !resp.JSON(&ci) {
 		return nil, ctf.Errorf(ctf.KindRemote, "GZCTF %s returned unexpected data: %s", path, core.Truncate(string(resp.Body), 200))
 	}
-	inst.Expires = ctf.Timestamp(ci.ExpectStopAt)
+	inst.Expires = ctf.Timestamp(string(ci.ExpectStopAt))
 	if ci.Entry != "" {
 		inst.Connect = d.connect(ci.Entry)
 	}
